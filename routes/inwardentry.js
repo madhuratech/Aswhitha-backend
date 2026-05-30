@@ -1,0 +1,294 @@
+const express = require("express");
+const router = express.Router();
+const db = require("../config/database");
+const axios = require("axios");
+
+
+router.get("/clients", async (req, res) => {
+
+    try{
+        const [rows] = await db.promise().query("SELECT id, customer_name FROM newclient");
+        res.json(rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server Error" });
+    }
+
+});
+
+// All Clients Search
+
+router.get("/clients/search", async (req, res) => {
+  const { q } = req.query;
+  const searchTerm = `%${q || ""}%`;
+   try{
+    const [rows] = await db.promise().query(
+        "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ?",
+        [searchTerm]
+    );
+    res.json(rows);
+   }catch(error){
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
+   }
+});
+
+// Get All items
+router.get("/items/:type", async (req, res) => {
+ const { type } = req.params;
+ let query = "";
+ if(type === "service"){
+    query = "SELECT service_name AS item_name, hsn_number FROM servicesdata";
+ }
+ else if(type === "spare"){
+   query = "SELECT spare_name AS item_name, hsn_number FROM sparedata";
+ }
+ else if(type === "purchase_item"){
+    query = "SELECT item_name, hsn_number FROM purchaseitems";
+ }
+ try{
+    const [rows] = await db.promise().query(query);
+    res.json(rows);
+ }catch(error){
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
+ }
+});
+
+// Get All items Search
+
+router.get("/items/:search", async (req, res) => {
+    const { search } = req.params;
+    const { q } = req.query;
+    const searchTerm = `%${q || ""}%`;
+    let query = "";
+    if(search === "service"){
+       query = "SELECT service_name AS item_name, hsn_number FROM servicedata WHERE service_name LIKE ?";
+    }
+    else if(search === "spares"){
+      query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ?";
+    }
+    else if(search === "purchase_item"){
+       query = "SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ?";
+    }
+    try{
+       const [rows] = await db.promise().query(query,[searchTerm]);
+       res.json(rows);
+    }catch(error){
+       console.error(error);
+       res.status(500).json({ message: "Server Error" });
+    }
+});
+
+// Create Inward Entry
+
+router.post("/new", async (req, res) => {
+    try {
+     const {
+        supplier_name,
+        sl_no,
+        entry_date,
+        dc_number,
+        dc_date,
+        job_number,
+        job_order_date,
+        transport,
+        description_type,
+        items,
+     } = req.body;
+
+     const [result] = await db.promise().query(
+        "INSERT INTO inward_entry (supplier_name, sl_no, entry_date, dc_number, dc_date, job_number, job_order_date, transport, description_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [supplier_name, sl_no, entry_date, dc_number, dc_date, job_number, job_order_date, transport, description_type]
+     );
+     const newInwardEntryId = result.insertId;
+
+    //  Insert items into inward_entry_items table
+
+    for (const item of items) {
+
+     await db.promise().query(
+        "INSERT INTO inward_items (inward_id, item_name, hsn, quantity, unit, pcb_sl_no, problems, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [newInwardEntryId, item.item_name, item.hsn, item.quantity, item.unit, item.pcb_sl_no, item.problems, item.remarks]
+     );
+    }
+    res.status(201).json({ message: "Inward Entry created successfully" });
+}catch(error){
+    console.error("Error creating Inward Entry:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+}
+});
+
+
+// Update Quotation
+
+router.put("/update/:dc_number", async (req, res) => {
+  try {
+    const { dc_number } = req.params;
+
+    const [rows] = await db.promise().query(
+      "SELECT id FROM inward_entry WHERE dc_number = ?",
+      [dc_number]
+    );
+
+    const inwardId = rows[0].id;
+
+    await db.promise().query(
+      `UPDATE inward_entry 
+       SET supplier_name=?, entry_date=?, dc_date=?, job_number=?, job_order_date=?, transport=?, description_type=? 
+       WHERE id=?`,
+      [
+        req.body.supplier_name,
+        req.body.entry_date,
+        req.body.dc_date,
+        req.body.job_number,
+        req.body.job_order_date,
+        req.body.transport,
+        req.body.description_type,
+        inwardId
+      ]
+    );
+
+    await db.promise().query(
+      "DELETE FROM inward_items WHERE inward_id=?",
+      [inwardId]
+    );
+
+    for (const item of req.body.items) {
+      await db.promise().query(
+        "INSERT INTO inward_items (inward_id, item_name, hsn, quantity, unit, pcb_sl_no, problems, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [inwardId, item.item_name, item.hsn, item.quantity, item.unit, item.pcb_sl_no, item.problems, item.remarks]
+      );
+    }
+
+    res.json({ message: "Updated" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Update Failed" });
+  }
+});
+
+// Get Next SL Number (auto-generate as SL-001, SL-002, ...)
+router.get("/next-sl", async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT sl_no FROM inward_entry ORDER BY id DESC LIMIT 1"
+    );
+    let nextNum = 1;
+    if (rows.length > 0 && rows[0].sl_no) {
+      const match = String(rows[0].sl_no).match(/(\d+)$/);
+      if (match) nextNum = parseInt(match[1]) + 1;
+    }
+    res.json({ sl_no: "SL-" + String(nextNum).padStart(3, "0") });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+// Get Inward number search (supports supplier filter)
+router.get("/IE/search", async (req, res) => {
+  const { q, supplier } = req.query;
+  const searchTerm = `%${q || ""}%`;
+  let query = "SELECT dc_number FROM inward_entry WHERE dc_number LIKE ?";
+  const params = [searchTerm];
+  if (supplier) {
+    query += " AND supplier_name = ?";
+    params.push(supplier);
+  }
+  query += " ORDER BY id DESC LIMIT 20";
+  try {
+    const [rows] = await db.promise().query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.log("Error Searching", error);
+    res.status(500).json({ message: "Search Failed" });
+  }
+});
+
+// Get EXisting inwardnumber to edit
+
+router.get("/edit/:dc_number", async (req, res) => {
+  try {
+    const { dc_number } = req.params;
+
+    const [rows] = await db.promise().query(
+      "SELECT * FROM inward_entry WHERE dc_number = ?",
+      [dc_number]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: "Not found" });
+    }
+
+    const entry = rows[0];
+
+    const [items] = await db.promise().query(
+      "SELECT * FROM inward_items WHERE inward_id = ?",
+      [entry.id]
+    );
+
+    res.json({ header: entry, items });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error" });
+  }
+});
+
+
+// delete
+router.delete("/delete/:dc_number", async (req, res) => {
+  try {
+    const { dc_number } = req.params;
+
+    const [rows] = await db.promise().query(
+      "SELECT id FROM inward_entry WHERE dc_number=?",
+      [dc_number]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: "Not found" });
+    }
+
+    const inwardId = rows[0].id;
+
+    await db.promise().query(
+      "DELETE FROM inward_items WHERE inward_id=?",
+      [inwardId]
+    );
+
+    await db.promise().query(
+      "DELETE FROM inward_entry WHERE id=?",
+      [inwardId]
+    );
+
+    res.json({ message: "Deleted" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Delete Failed" });
+  }
+});
+// Get All Inward Entries
+router.get("/all", async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT * FROM inward_entry ORDER BY id DESC"
+    );
+    for (const row of rows) {
+      const [items] = await db.promise().query(
+        "SELECT * FROM inward_items WHERE inward_id = ?",
+        [row.id]
+      );
+      row.items = items;
+    }
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+module.exports = router;
