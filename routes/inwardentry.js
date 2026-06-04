@@ -291,4 +291,50 @@ router.get("/all", async (req, res) => {
   }
 });
 
+// Distinct suppliers for dropdown
+router.get("/report/suppliers", async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT DISTINCT supplier_name FROM inward_entry ORDER BY supplier_name ASC"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+// Report with filters
+router.get("/report/filters", async (req, res) => {
+  const { fromDate, toDate, dcNumber, clientName } = req.query;
+  let query = `
+    SELECT ie.dc_number, ie.entry_date, ie.dc_date, ie.supplier_name AS client_name,
+           ii.item_name, ii.quantity, ii.problems, ii.remarks
+    FROM inward_entry ie
+    LEFT JOIN inward_items ii ON ie.id = ii.inward_id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (fromDate && toDate) {
+    query += " AND ie.entry_date BETWEEN ? AND ?";
+    params.push(fromDate, toDate);
+  }
+  if (dcNumber) {
+    query += " AND ie.dc_number = ?";
+    params.push(dcNumber);
+  }
+  if (clientName) {
+    query += " AND ie.supplier_name LIKE ?";
+    params.push(`%${clientName}%`);
+  }
+  query += " ORDER BY ie.id DESC";
+  try {
+    const [rows] = await db.promise().query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
 module.exports = router;

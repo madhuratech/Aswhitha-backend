@@ -2,19 +2,15 @@ const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 
-// Generate Service Invoice Number
-
+// Generate shared invoice number across service_invoices, directinvoice, salesinvoice
 async function GenerateServiceInvoice() {
-
-  const [rows] = await db.promise().query(
-    "SELECT MAX(id) AS lastId FROM service_invoices"
-  );
-
-  let lastId = rows[0].lastId || 0;
-
-  let nextId = lastId + 1;
-
-  return `AT/SV/INV-${nextId.toString().padStart(3, "0")}`;
+  const [[sv], [di], [si]] = await Promise.all([
+    db.promise().query("SELECT MAX(id) AS m FROM service_invoices"),
+    db.promise().query("SELECT MAX(id) AS m FROM directinvoice"),
+    db.promise().query("SELECT MAX(id) AS m FROM salesinvoice")
+  ]);
+  const nextId = Math.max(sv[0].m || 0, di[0].m || 0, si[0].m || 0) + 1;
+  return `AT/INV/${nextId.toString().padStart(3, "0")}`;
 }
 
 

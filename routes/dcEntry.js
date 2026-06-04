@@ -3,60 +3,74 @@ const router = express.Router();
 const db = require("../config/database");
 
 
-// Suppliers who have inward entries only
-
-router.get("/clients", async (req, res) => {
-
+// Auto-generate next Service DC number
+router.get("/next-dc-no", async (req, res) => {
   try {
-
-    const [rows] = await db.promise().query(
-      `SELECT DISTINCT supplier_name AS customer_name
-       FROM inward_entry
-       ORDER BY supplier_name ASC`
-    );
-
-    res.json(rows);
-
-  } catch (err) {
-
-    console.error(err);
-
-    res.status(500).json({
-      message: "Server Error"
-    });
-
+    const [rows] = await db.promise().query("SELECT MAX(id) AS lastId FROM service_dc_entries");
+    const nextId = (rows[0].lastId || 0) + 1;
+    res.json({ dc_no: `AT/SRDC-${nextId.toString().padStart(3, "0")}` });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 });
 
-
-// Supplier Search (only those with inward entries)
-
-router.get("/clients/search", async (req, res) => {
-
+// Clients — only those who have inward entries
+router.get("/clients", async (req, res) => {
   try {
-
-    const { q } = req.query;
-
-    const searchTerm = `%${q || ""}%`;
-
     const [rows] = await db.promise().query(
-      `SELECT DISTINCT supplier_name AS customer_name
-       FROM inward_entry
-       WHERE supplier_name LIKE ?
-       ORDER BY supplier_name ASC`,
-      [searchTerm]
+      "SELECT DISTINCT supplier_name AS customer_name FROM inward_entry ORDER BY supplier_name ASC"
     );
-
     res.json(rows);
-
   } catch (err) {
-
     console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
 
-    res.status(500).json({
-      message: "Server Error"
-    });
+// Client search — only inward entry customers
+router.get("/clients/search", async (req, res) => {
+  try {
+    const { q } = req.query;
+    const [rows] = await db.promise().query(
+      "SELECT DISTINCT supplier_name AS customer_name FROM inward_entry WHERE supplier_name LIKE ? ORDER BY supplier_name ASC LIMIT 20",
+      [`%${q || ""}%`]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
 
+// Client DC numbers from inward_entry filtered by client name
+router.get("/client-dc-list", async (req, res) => {
+  try {
+    const { client, q } = req.query;
+    let query = "SELECT dc_number, dc_date FROM inward_entry WHERE 1=1";
+    const params = [];
+    if (client) { query += " AND supplier_name = ?"; params.push(client); }
+    if (q) { query += " AND dc_number LIKE ?"; params.push(`%${q}%`); }
+    query += " ORDER BY id DESC LIMIT 20";
+    const [rows] = await db.promise().query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+// Search service DC entries by their auto-generated DC number
+router.get("/DC/search", async (req, res) => {
+  try {
+    const { q } = req.query;
+    const [rows] = await db.promise().query(
+      "SELECT inward_dc_no AS dc_number FROM service_dc_entries WHERE inward_dc_no LIKE ? ORDER BY id DESC LIMIT 20",
+      [`%${q || ""}%`]
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Search Failed" });
   }
 });
 
@@ -120,7 +134,13 @@ router.get("/inward/:dc_number", async (req, res) => {
       [dc_number]
     );
 
-    res.json({ header: entry, items: items || [] });
+    res.json({
+      header: {
+        ...entry,
+        inward_date: entry.dc_date
+      },
+      items: items || []
+    });
 
   } catch (error) {
 
