@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
 // Recipt Auto Gentrate
  async function generateSupplierNumber() {
@@ -28,7 +29,7 @@ router.get('/getrecipt', async(req,res) =>{
 // Get all suppliers
 router.get("/clients", async (req, res) => {
   try {
-    const [rows] = await db.promise().query("SELECT * FROM newclient");
+    const [rows] = await db.promise().query("SELECT * FROM newclient ORDER BY customer_name ASC");
     res.json(rows);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -41,7 +42,7 @@ router.get("/clients/search", async (req, res) => {
   const { q } = req.query;
   try {
     const [rows] = await db.promise().query(
-      "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ?",
+      "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC",
       [`%${q}%`]
     );
     res.json(rows);
@@ -54,32 +55,31 @@ router.get("/clients/search", async (req, res) => {
 
 router.post("/create", async (req, res) => {
   try{
-  const{date, supplier_name, bank_name, ref_no, paid_amount, tds, others,
-  remarks, received_by, payment_status,payment_mode }=req.body;
+  const s = sanitizeBody(req.body);
   const receipt_no = await generateSupplierNumber();
 
-
   // Get Po Totals
-
-   const [po] = await db.promise().query(
-  "SELECT grandTotal FROM purchase_orders WHERE client_name = ? ORDER BY id DESC LIMIT 1",
-  [supplier_name]
-);
+  const [po] = await db.promise().query(
+    "SELECT grandTotal FROM purchase_orders WHERE client_name = ? ORDER BY id DESC LIMIT 1",
+    [s.supplier_name]
+  );
 
   // Calculate
+  const pototal = po.length > 0 ? po[0].grandTotal : 0;
+  const paid  = toNum(s.paid_amount);
+  const tds   = toNum(s.tds);
+  const others = toNum(s.others);
+  const net_amount     = paid - tds - others;
+  const balance_amount = pototal - paid - tds - others;
 
-   const pototal = po.length > 0 ? po[0].grandTotal : 0;
-  
-  const net_amount = (paid_amount || 0) - (tds || 0) - (others || 0);
-  const balance_amount = pototal - (paid_amount || 0) - (tds || 0) - (others || 0);
-
-   const [result] = await db.promise().query(
+  const [result] = await db.promise().query(
     "INSERT INTO supplier_advance (receipt_no, date, payment_mode, supplier_name, bank_name, ref_no, paid_amount, tds, others, net_amount, balance_amount, remarks, received_by, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [receipt_no, date, payment_mode, supplier_name, bank_name, ref_no, paid_amount, tds, others, net_amount, balance_amount, remarks, received_by, payment_status]);
+    [receipt_no, emptyToNull(s.date), emptyToNull(s.payment_mode), s.supplier_name, emptyToNull(s.bank_name), emptyToNull(s.ref_no), paid, tds, others, net_amount, balance_amount, emptyToNull(s.remarks), emptyToNull(s.received_by), emptyToNull(s.payment_status)]
+  );
 
-res.status(200).json({message: "Supplier advance created successfully", id: result.insertId});  
-} catch(error){
-    console,log("Create Error",error);
+  res.status(200).json({message: "Supplier advance created successfully", id: result.insertId});
+  } catch(error){
+    console.log("Create Error",error);
     res.status(500).json({message: error.message});
   }
 });
@@ -187,23 +187,12 @@ router.get("/report", async (req, res) => {
 router.put('/update/:receipt_no', async (req, res) => {
   try {
     const { receipt_no } = req.params;
+    const s = sanitizeBody(req.body);
 
-    const {
-      date,
-      supplier_name,
-      bank_name,
-      ref_no,
-      paid_amount,
-      tds,
-      others,
-      remarks,
-      received_by,
-      payment_status
-    } = req.body;
-
-    const net_amount =
-      (paid_amount || 0) - (tds || 0) - (others || 0);
-
+    const paid    = toNum(s.paid_amount);
+    const tds     = toNum(s.tds);
+    const others  = toNum(s.others);
+    const net_amount     = paid - tds - others;
     const balance_amount = net_amount;
 
     const sql = `
@@ -225,19 +214,19 @@ router.put('/update/:receipt_no', async (req, res) => {
     `;
 
     await db.promise().query(sql, [
-      date,
-      supplier_name,
-      bank_name,
-      ref_no,
-      paid_amount,
+      emptyToNull(s.date),
+      s.supplier_name,
+      emptyToNull(s.bank_name),
+      emptyToNull(s.ref_no),
+      paid,
       tds,
       others,
       net_amount,
-      payment_mode,
+      emptyToNull(s.payment_mode),
       balance_amount,
-      remarks,
-      received_by,
-      payment_status,
+      emptyToNull(s.remarks),
+      emptyToNull(s.received_by),
+      emptyToNull(s.payment_status),
       receipt_no
     ]);
 

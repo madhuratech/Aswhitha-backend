@@ -62,12 +62,30 @@ router.post("/new", (req, res) => {
   });
 });
 
+router.get("/summary", (req, res) => {
+  const sql = `
+    SELECT category, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
+    FROM expenses
+    GROUP BY category
+    ORDER BY total DESC
+  `;
+  db.query(sql, (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Summary failed" });
+    }
+    const totalAmount = results.reduce((s, r) => s + Number(r.total), 0);
+    const totalCount = results.reduce((s, r) => s + r.count, 0);
+    res.json({ totalAmount, totalCount, byCategory: results });
+  });
+});
+
 //Get all expense details
 
 router.get("/all", (req, res) => {
 
     const sql = "SELECT * FROM expenses";
-  
+
     db.query(sql, (err, results) => {
       if (err) {
         console.error(err);
@@ -75,7 +93,7 @@ router.get("/all", (req, res) => {
       }
       res.json(results);
     });
-  
+
   });
 
 

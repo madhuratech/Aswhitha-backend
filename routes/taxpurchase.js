@@ -50,7 +50,7 @@ router.get(`/clients`, async(req,res) =>{
 
     try{
         const[rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient"
+            "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC" 
          );
          res.json(rows);
     }catch(error){
@@ -65,7 +65,7 @@ router.get("/clients/search", async(req, res) => {
     const searchTerm = `%${q || ""}%`;
     try{
       const [rows] = await db.promise().query(
-        "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? LIMIT 20",
+        "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
         [searchTerm]
       );
       res.json(rows);

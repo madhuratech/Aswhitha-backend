@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
 
 // Auto-generate next Service DC number
@@ -116,7 +117,7 @@ router.get("/inward/:dc_number", async (req, res) => {
     const { dc_number } = req.params;
 
     const [rows] = await db.promise().query(
-      `SELECT supplier_name, dc_number, dc_date, job_number, job_order_date
+      `SELECT supplier_name, dc_number, dc_date
        FROM inward_entry WHERE dc_number = ?`,
       [dc_number]
     );
@@ -154,98 +155,55 @@ router.get("/inward/:dc_number", async (req, res) => {
 });
 
 
-//Create new Dc Entry 
+//Create new Dc Entry
 
 router.post("/createdc", async (req, res) => {
   try {
-
-    const {
-      supplier_name,
-      inward_dc_no,
-      dc_date,
-      party_dc_no,
-      party_dc_date,
-      payment_terms,
-      despatch_through,
-      status,
-      items
-    } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
 
     const [result] = await db.promise().query(
-
-  `INSERT INTO service_dc_entries
-  (
-    supplier_name,
-    inward_dc_no,
-    dc_date,
-    party_dc_no,
-    party_dc_date,
-    payment_terms,
-    despatch_through,
-    status
-  )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-
-  [
-    supplier_name,
-    inward_dc_no,
-    dc_date,
-    party_dc_no,
-    party_dc_date,
-    payment_terms,
-    despatch_through,
-    status
-  ]
-);
+      `INSERT INTO service_dc_entries
+      (supplier_name, inward_dc_no, dc_date, party_dc_no, party_dc_date, payment_terms, despatch_through, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        s.supplier_name,
+        s.inward_dc_no,
+        emptyToNull(s.dc_date),
+        emptyToNull(s.party_dc_no),
+        emptyToNull(s.party_dc_date),
+        emptyToNull(s.payment_terms),
+        emptyToNull(s.despatch_through),
+        emptyToNull(s.status)
+      ]
+    );
 
     const newDcEntryId = result.insertId;
 
     for (const item of items) {
-
-   await db.promise().query(
-
-  `INSERT INTO service_dc_items
-  (
-    service_dc_id,
-    item_name,
-    quantity,
-    serial_no,
-    received_qty,
-    uom,
-    hsn,
-    remarks
-  )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-
-  [
-    newDcEntryId,
-    item.item_name || "",
-    item.quantity || null,
-    item.serial_no || "",
-    item.received_qty || null,
-    item.uom || "",
-    item.hsn || "",
-    item.remarks || ""
-  ]
-
-);
-
+      await db.promise().query(
+        `INSERT INTO service_dc_items
+        (service_dc_id, item_name, quantity, serial_no, received_qty, uom, hsn, remarks)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newDcEntryId,
+          emptyToNull(item.item_name),
+          toNum(item.quantity, null),
+          emptyToNull(item.serial_no),
+          toNum(item.received_qty),
+          emptyToNull(item.uom),
+          emptyToNull(item.hsn),
+          emptyToNull(item.remarks)
+        ]
+      );
     }
 
-    res.status(201).json({
-      message: "DC Entry created successfully"
-    });
+    res.status(201).json({ message: "DC Entry created successfully" });
 
   } catch (error) {
-
     console.error("Error creating DC Entry:", error);
-
-    res.status(500).json({
-      message: "Internal Server Error"
-    });
-
+    res.status(500).json({ message: "Internal Server Error" });
   }
-
 });
 
 
@@ -254,46 +212,27 @@ router.post("/createdc", async (req, res) => {
 router.put("/updatedc/:id", async (req, res) => {
   try {
     const dcId = req.params.id;
-    const {
-      supplier_name,
-      inward_dc_no,
-      dc_date,
-      party_dc_no,
-      party_dc_date,
-      payment_terms,
-      despatch_through,
-      status,
-      items
-    } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
 
     // Update the main entry
- await db.promise().query(
-
-  `UPDATE service_dc_entries
-   SET
-   supplier_name=?,
-   inward_dc_no=?,
-   dc_date=?,
-   party_dc_no=?,
-   party_dc_date=?,
-   payment_terms=?,
-   despatch_through=?,
-   status=?
-   WHERE id=?`,
-
-  [
-    supplier_name,
-    inward_dc_no,
-    dc_date,
-    party_dc_no,
-    party_dc_date,
-    payment_terms,
-    despatch_through,
-    status,
-    dcId
-  ]
-
-);
+    await db.promise().query(
+      `UPDATE service_dc_entries
+       SET supplier_name=?, inward_dc_no=?, dc_date=?, party_dc_no=?,
+           party_dc_date=?, payment_terms=?, despatch_through=?, status=?
+       WHERE id=?`,
+      [
+        s.supplier_name,
+        s.inward_dc_no,
+        emptyToNull(s.dc_date),
+        emptyToNull(s.party_dc_no),
+        emptyToNull(s.party_dc_date),
+        emptyToNull(s.payment_terms),
+        emptyToNull(s.despatch_through),
+        emptyToNull(s.status),
+        dcId
+      ]
+    );
 
     // Delete existing items
     await db.promise().query("DELETE FROM service_dc_items WHERE service_dc_id=?", [dcId]);
@@ -302,18 +241,14 @@ router.put("/updatedc/:id", async (req, res) => {
     for (const item of items) {
       await db.promise().query(
         "INSERT INTO service_dc_items (service_dc_id, item_name, quantity, serial_no, received_qty, uom, hsn, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [dcId, item.item_name || "", item.quantity || null, item.serial_no || "", item.received_qty || null, item.uom || "", item.hsn || "", item.remarks || ""]
+        [dcId, emptyToNull(item.item_name), toNum(item.quantity, null), emptyToNull(item.serial_no), toNum(item.received_qty), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks)]
       );
     }
 
-    res.json({
-      message: "DC Entry updated successfully"
-    });
+    res.json({ message: "DC Entry updated successfully" });
   } catch (error) {
     console.error("Error updating DC Entry:", error);
-    res.status(500).json({
-      message: "Internal Server Error"
-    });
+    res.status(500).json({ message: "Internal Server Error" });
   }
 });
 

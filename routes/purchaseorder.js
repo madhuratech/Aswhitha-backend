@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../config/database');
 const axios = require('axios');
 const ExcelJS = require("exceljs");
+const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
 
 // generate a random PO number
@@ -35,7 +36,7 @@ router.get("/clients/search", async (req, res) => {
   const searchTerm = `%${q || ""}%`;
   try {
     const [rows] = await db.promise().query(
-      "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? LIMIT 20",
+      "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? LIMIT 20 ORDER BY customer_name ASC",
       [searchTerm]
     );
     res.json(rows);
@@ -49,7 +50,7 @@ router.get("/clients/search", async (req, res) => {
 router.get('/clients', async (req, res) => {
   try {
     const [rows] = await db.promise().query(
-      "SELECT id, customer_name FROM newclient"
+      "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC "
     );
     res.json(rows);
   } catch (error) {
@@ -117,21 +118,21 @@ router.get('/items/:type', async (req, res) => {
 // Create a new purchase order
 router.post('/new', async (req, res) => {
   try {
-    const { client_name, order_type, po_date, items, subtotal, cgst, sgst, roundOff, grandTotal, narration, po_number } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
     const poNumber = await generatePONumber();
 
     const [poResult] = await db.promise().query(
       'INSERT INTO purchase_orders (po_number, client_name, order_type, po_date, subtotal, cgst, sgst, roundOff, grandTotal, narration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [poNumber, client_name, order_type, po_date, subtotal, cgst, sgst, roundOff, grandTotal, narration]
+      [poNumber, s.client_name, emptyToNull(s.order_type), emptyToNull(s.po_date), toNum(s.subtotal), toNum(s.cgst), toNum(s.sgst), toNum(s.roundOff), toNum(s.grandTotal), emptyToNull(s.narration)]
     );
     const poId = poResult.insertId;
 
-    //  Insert items into purchase_order_items table
     for (const item of items) {
-      const amount = item.price * item.quantity;
+      const amount = toNum(item.price) * toNum(item.quantity);
       await db.promise().query(
         `INSERT INTO purchase_order_items (po_id, item_name, price, quantity, hsn_code, unit, amount) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [poId, item.item_name, item.price, item.quantity, item.hsn_code, item.unit, amount]
+        [poId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.hsn_code), emptyToNull(item.unit), amount]
       );
     }
     res.status(201).json({ message: 'Purchase order created successfully', po_number: poNumber });
@@ -145,8 +146,9 @@ router.post('/new', async (req, res) => {
 router.put('/:poNumber', async (req, res) => {
   const { poNumber } = req.params;
   try {
-    const { client_name, order_type, po_date, items, subtotal, cgst, sgst,
-      roundOff, grandTotal, narration } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+
     const [poRows] = await db.promise().query(
       "SELECT * FROM purchase_orders WHERE po_number = ?",
       [poNumber]
@@ -154,31 +156,18 @@ router.put('/:poNumber', async (req, res) => {
     const poId = poRows[0].id;
     await db.promise().query(
       "UPDATE purchase_orders SET client_name = ?, order_type = ?, po_date = ?, subtotal = ?, cgst = ?, sgst = ?, roundOff = ?, grandTotal = ?, narration = ? WHERE id = ?",
-      [client_name, order_type, po_date, subtotal, cgst, sgst, roundOff, grandTotal, narration, poId]
-    );
-    //  Delete existing items
-    await db.promise().query(
-      "DELETE FROM purchase_order_items WHERE po_id = ?",
-      [poId]
+      [s.client_name, emptyToNull(s.order_type), emptyToNull(s.po_date), toNum(s.subtotal), toNum(s.cgst), toNum(s.sgst), toNum(s.roundOff), toNum(s.grandTotal), emptyToNull(s.narration), poId]
     );
 
-    //insert updated items
+    // Delete existing items
+    await db.promise().query("DELETE FROM purchase_order_items WHERE po_id = ?", [poId]);
 
+    // Insert updated items
     for (const item of items) {
-      const amount = item.price * item.quantity;
+      const amount = toNum(item.price) * toNum(item.quantity);
       await db.promise().query(
-        `INSERT INTO purchase_order_items 
-        (po_id, item_name, price, quantity, hsn_code, unit, amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          poId,
-          item.item_name,
-          item.price,
-          item.quantity,
-          item.hsn_code,
-          item.unit,
-          amount,
-        ]
+        `INSERT INTO purchase_order_items (po_id, item_name, price, quantity, hsn_code, unit, amount) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [poId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.hsn_code), emptyToNull(item.unit), amount]
       );
     }
     res.json({ message: "Updated successfully" });

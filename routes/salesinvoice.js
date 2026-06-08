@@ -1,21 +1,42 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
 // INVOICE GENTRATE
-async function InvoiceGentrate() {
-    const [rows] = await db.promise().query(
-        "SELECT MAX(id) AS lastId FROM salesinvoice"
-    );
-    let lastId = rows[0].lastId || 0;
-    let nextId = lastId + 1;
-    return `AT/SINV-${nextId.toString().padStart(3, '0')}`;
+async function GenerateInvoiceNumber() {
+    const [rows] = await db.promise().query(`
+        SELECT invoice_no FROM salesinvoice
+        UNION ALL
+        SELECT invoice_no FROM service_invoices
+        UNION ALL
+        SELECT invoice_no FROM directinvoice
+    `);
+
+    let maxNumber = 0;
+
+    rows.forEach(row => {
+        if (!row.invoice_no) return;
+
+        const match = row.invoice_no.match(/AT\/INV\/(\d+)/);
+
+        if (match) {
+            maxNumber = Math.max(
+                maxNumber,
+                parseInt(match[1], 10)
+            );
+        }
+    });
+
+    const nextNumber = maxNumber + 1;
+
+    return `AT/INV/${String(nextNumber).padStart(3, "0")}`;
 }
 
 // Get Bill No
 router.get("/next-In-billno", async (req, res) => {
     try {
-        const InvoiceNumber = await InvoiceGentrate();
+        const InvoiceNumber = await GenerateInvoiceNumber();
         res.json({ invoice_no: InvoiceNumber });
     } catch (error) {
         console.error("Error Generating Invoice Number:", error);
@@ -158,30 +179,11 @@ router.get('/items/:type', async (req, res) => {
 
 // Create New invoice
 router.post('/new', async (req, res) => {
-    const {
-        customer_name,
-        invoice_no,
-        invoice_date,
-        dc_no,
-        dc_date,
-        order_no,
-        order_date,
-        payment_terms,
-        dispatch_through,
-        discount,
-        transport,
-        subtotal,
-        cgst,
-        sgst,
-        igst,
-        round_off,
-        grandtotal,
-        items,
-        ordertype
-    } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!customer_name || !invoice_no || !invoice_date || !dc_no || !items || !items.length) {
-        return res.status(400).json({ message: "Customer, Invoice No, DC No, Invoice Date and at least one item are required" });
+    if (!s.customer_name || !s.invoice_no || !s.invoice_date || !items.length) {
+        return res.status(400).json({ message: "Customer, Invoice No, Invoice Date and at least one item are required" });
     }
 
     const conn = await db.promise().getConnection();
@@ -193,24 +195,24 @@ router.post('/new', async (req, res) => {
              (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, payment_terms, dispatch_through, discount, transport, subtotal, cgst, sgst, igst, round_off, grandtotal, ordertype)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                customer_name,
-                invoice_no,
-                invoice_date,
-                dc_no || null,
-                dc_date || null,
-                order_no || null,
-                order_date || null,
-                payment_terms || null,
-                dispatch_through || null,
-                discount || 0,
-                transport || 0,
-                subtotal || 0,
-                cgst || 0,
-                sgst || 0,
-                igst || 0,
-                round_off || 0,
-                grandtotal || 0,
-                ordertype || null
+                s.customer_name,
+                s.invoice_no,
+                s.invoice_date,
+                emptyToNull(s.dc_no),
+                emptyToNull(s.dc_date),
+                emptyToNull(s.order_no),
+                emptyToNull(s.order_date),
+                emptyToNull(s.payment_terms),
+                emptyToNull(s.dispatch_through),
+                toNum(s.discount),
+                toNum(s.transport),
+                toNum(s.subtotal),
+                toNum(s.cgst),
+                toNum(s.sgst),
+                toNum(s.igst),
+                toNum(s.round_off),
+                toNum(s.grandtotal),
+                emptyToNull(s.ordertype)
             ]
         );
 
@@ -221,14 +223,14 @@ router.post('/new', async (req, res) => {
                 VALUES (?, ?, ?, ?, ?, ?, ?)`;
 
         for (const item of items) {
-            const amount = Number(item.price || 0) * Number(item.quantity || 0);
+            const amount = toNum(item.price) * toNum(item.quantity);
             await conn.query(itemSql, [
                 invoiceId,
-                item.item_name,
-                item.price,
-                item.quantity,
-                item.uom,
-                item.hsn_number,
+                emptyToNull(item.item_name),
+                toNum(item.price),
+                toNum(item.quantity),
+                emptyToNull(item.uom),
+                emptyToNull(item.hsn_number),
                 amount
             ]);
         }
@@ -247,30 +249,11 @@ router.post('/new', async (req, res) => {
 // Update Invoice
 router.put('/update/:invoiceNo', async (req, res) => {
     const { invoiceNo } = req.params;
-    const {
-        customer_name,
-        invoice_no,
-        invoice_date,
-        dc_no,
-        dc_date,
-        order_no,
-        order_date,
-        payment_terms,
-        dispatch_through,
-        discount,
-        transport,
-        subtotal,
-        cgst,
-        sgst,
-        igst,
-        round_off,
-        grandtotal,
-        items,
-        ordertype
-    } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!customer_name || !invoice_no || !invoice_date || !dc_no || !items || !items.length) {
-        return res.status(400).json({ message: "Customer, Invoice No, DC No, Invoice Date and at least one item are required" });
+    if (!s.customer_name || !s.invoice_no || !s.invoice_date || !items.length) {
+        return res.status(400).json({ message: "Customer, Invoice No, Invoice Date and at least one item are required" });
     }
 
     const conn = await db.promise().getConnection();
@@ -290,25 +273,14 @@ router.put('/update/:invoiceNo', async (req, res) => {
         await conn.query(
             "UPDATE salesinvoice SET customer_name=?, invoice_no=?, invoice_date=?, dc_no=?, dc_date=?, order_no=?, order_date=?, payment_terms=?, dispatch_through=?, discount=?, transport=?, subtotal=?, cgst=?, sgst=?, igst=?, round_off=?, grandtotal=?, ordertype=? WHERE id=?",
             [
-                customer_name,
-                invoice_no,
-                invoice_date,
-                dc_no || null,
-                dc_date || null,
-                order_no || null,
-                order_date || null,
-                payment_terms || null,
-                dispatch_through || null,
-                discount || 0,
-                transport || 0,
-                subtotal || 0,
-                cgst || 0,
-                sgst || 0,
-                igst || 0,
-                round_off || 0,
-                grandtotal || 0,
-                ordertype || null,
-                invoiceId
+                s.customer_name, s.invoice_no, s.invoice_date,
+                emptyToNull(s.dc_no), emptyToNull(s.dc_date),
+                emptyToNull(s.order_no), emptyToNull(s.order_date),
+                emptyToNull(s.payment_terms), emptyToNull(s.dispatch_through),
+                toNum(s.discount), toNum(s.transport), toNum(s.subtotal),
+                toNum(s.cgst), toNum(s.sgst), toNum(s.igst),
+                toNum(s.round_off), toNum(s.grandtotal),
+                emptyToNull(s.ordertype), invoiceId
             ]
         );
 
@@ -316,14 +288,14 @@ router.put('/update/:invoiceNo', async (req, res) => {
 
         const itemSql = "INSERT INTO salesinvoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount) VALUES (?, ?, ?, ?, ?, ?, ?)";
         for (const item of items) {
-            const amount = Number(item.price || 0) * Number(item.quantity || 0);
+            const amount = toNum(item.price) * toNum(item.quantity);
             await conn.query(itemSql, [
                 invoiceId,
-                item.item_name,
-                item.price,
-                item.quantity,
-                item.uom,
-                item.hsn_number,
+                emptyToNull(item.item_name),
+                toNum(item.price),
+                toNum(item.quantity),
+                emptyToNull(item.uom),
+                emptyToNull(item.hsn_number),
                 amount
             ]);
         }

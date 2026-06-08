@@ -1,9 +1,12 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { emptyToNull, sanitizeBody } = require("../helpers/sanitize");
 
 router.post("/new", (req, res) => {
-  console.log("REQ BODY:", req.body); 
+  console.log("REQ BODY:", req.body);
+
+  const s = sanitizeBody(req.body);
 
   const {
     customer_type,
@@ -11,12 +14,11 @@ router.post("/new", (req, res) => {
     phone,
     email,
     address,
-    gst_number,
-    state,
     pincode,
-    contact_person, 
-  } = req.body;
+    contact_person,
+  } = s;
 
+  // Only truly required fields are validated
   if (!customer_type || !customer_name || !phone || !email || !address || !pincode || !contact_person) {
     return res.status(400).json({ message: "Required fields missing" });
   }
@@ -29,7 +31,7 @@ router.post("/new", (req, res) => {
 
   db.query(
     sql,
-    [customer_type, customer_name, phone, email, address, gst_number, state, pincode, contact_person],
+    [s.customer_type, s.customer_name, s.phone, s.email, s.address, emptyToNull(s.gst_number), emptyToNull(s.state), s.pincode, s.contact_person],
     (err, result) => {
       if (err) {
         console.error("DB ERROR:", err);
@@ -69,19 +71,35 @@ router.get("/search", (req,res)=>{
 // Get ALL customers
 router.get("/all", (req, res) => {
   const sql = `
-    SELECT 
-      id,
-      customer_type,
-      customer_name,
-      phone,
-      email,
-      address,
-      gst_number,
-      state,
-      pincode,
-      contact_person
-    FROM newclient
-    ORDER BY id DESC
+    SELECT
+      nc.id,
+      nc.customer_type,
+      nc.customer_name,
+      nc.phone,
+      nc.email,
+      nc.address,
+      nc.gst_number,
+      nc.state,
+      nc.pincode,
+      nc.contact_person,
+      COALESCE(si.total_sales, 0) + COALESCE(svi.total_service, 0) - COALESCE(r.total_receipts, 0) AS balance
+    FROM newclient nc
+    LEFT JOIN (
+      SELECT customer_name, SUM(grandtotal) AS total_sales
+      FROM salesinvoice
+      GROUP BY customer_name
+    ) si ON si.customer_name = nc.customer_name
+    LEFT JOIN (
+      SELECT customer_name, SUM(grand_total) AS total_service
+      FROM service_invoices
+      GROUP BY customer_name
+    ) svi ON svi.customer_name = nc.customer_name
+    LEFT JOIN (
+      SELECT customer_name, SUM(grand_total) AS total_receipts
+      FROM receipts
+      GROUP BY customer_name
+    ) r ON r.customer_name = nc.customer_name
+    ORDER BY nc.id DESC
   `;
 
   db.query(sql, (err, result) => {
@@ -96,16 +114,16 @@ router.get("/all", (req, res) => {
 
 // Update 
 
-router.put("/update/:id", (req,res) =>{
+router.put("/update/:id", (req,res) => {
   const {id} = req.params;
-  const { customer_name, phone, email, address, gst_number, state, pincode, contact_person } = req.body;
+  const s = sanitizeBody(req.body);
 
    const sql = `update newclient SET customer_name=?, phone=?, email=?, address=?, gst_number=?, state=?, pincode=?, contact_person=? WHERE id=?`;
    
    db.query(
     sql,
-    [customer_name,phone,email,address,gst_number,state,pincode,contact_person,id],
-    (err) =>{
+    [s.customer_name, s.phone, s.email, s.address, emptyToNull(s.gst_number), emptyToNull(s.state), s.pincode, s.contact_person, id],
+    (err) => {
       if(err){
         console.log(err);
         return res.status(500).json({message:"Update Failed"})
@@ -113,7 +131,6 @@ router.put("/update/:id", (req,res) =>{
       res.json({success:"True"});
     }
    );
-  
   });
 
   // DELETE

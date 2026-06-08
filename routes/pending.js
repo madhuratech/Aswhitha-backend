@@ -13,6 +13,44 @@ router.get("/ping", (req, res) => {
 });
 
 /* =========================
+   CALCULATED PENDING
+   Inward Qty − SUM(Service DC Qty), only pending_qty > 0
+========================= */
+router.get("/calculated", async (req, res) => {
+    try {
+        const [rows] = await db.promise().query(`
+            SELECT
+                ie.id                                                   AS entry_id,
+                ii.id                                                   AS item_id,
+                ie.supplier_name                                        AS customer_name,
+                ie.dc_number                                            AS dc_no,
+                DATE_FORMAT(ie.dc_date, '%Y-%m-%d')                     AS dc_date,
+                ie.description_type                                     AS item_type,
+                ii.item_name,
+                ii.quantity                                             AS order_qty,
+                COALESCE(SUM(sdi.quantity), 0)                          AS despatch_qty,
+                (ii.quantity - COALESCE(SUM(sdi.quantity), 0))          AS pending_qty
+            FROM inward_entry ie
+            JOIN inward_items ii
+                ON ii.inward_id = ie.id
+            LEFT JOIN service_dc_entries sde
+                ON  sde.supplier_name = ie.supplier_name
+                AND sde.party_dc_no   = ie.dc_number
+            LEFT JOIN service_dc_items sdi
+                ON  sdi.service_dc_id = sde.id
+                AND sdi.item_name     = ii.item_name
+            GROUP BY ie.id, ii.id
+            HAVING pending_qty > 0
+            ORDER BY ie.id DESC
+        `);
+        res.json(rows);
+    } catch (err) {
+        console.log("CALCULATED PENDING ERROR:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+/* =========================
    GET PENDING LIST
 ========================= */
 router.get("/list", async (req, res) => {

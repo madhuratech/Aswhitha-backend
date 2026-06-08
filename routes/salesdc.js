@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
 async function DCGenerate() {
     const [rows] = await db.promise().query(
@@ -26,7 +27,7 @@ router.get("/clients/search", async (req, res) => {
     const { q } = req.query;
     try {
         const [rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name LIMIT 20",
+            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
             [`%${q || ""}%`]
         );
         res.json(rows);
@@ -46,7 +47,7 @@ router.get("/items/search", async (req, res) => {
     const values = [`%${q || ""}%`];
 
     if (type === "service") {
-        query = "SELECT service_name AS item_name, hsn_number FROM servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
+        query = "SELECT service_name AS item_name, hsn_number FROM servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20 ";
     } else if (type === "spare") {
         query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
     } else if (type === "purchase_item") {
@@ -66,21 +67,10 @@ router.get("/items/search", async (req, res) => {
 
 // Create new Sales DC
 router.post("/new", async (req, res) => {
-    const {
-        customer_name,
-        dc_no,
-        dc_date,
-        order_no,
-        order_date,
-        payment_terms,
-        Client_dc_date,
-        despatch_through,
-        status,
-        ordertype,
-        items
-    } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!customer_name || !dc_no || !payment_terms || !items || !items.length) {
+    if (!s.customer_name || !s.dc_no || !s.payment_terms || !items.length) {
         return res.status(400).json({ message: "Customer, Admin DC No, Client DC No and at least one item are required" });
     }
 
@@ -93,16 +83,16 @@ router.post("/new", async (req, res) => {
              (customer_name, dc_no, dc_date, order_no, order_date, payment_terms, Client_dc_date, despatch_through, status, ordertype)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                customer_name,
-                dc_no,
-                dc_date || null,
-                order_no || null,
-                order_date || null,
-                payment_terms || null,
-                Client_dc_date || null,
-                despatch_through || null,
-                status || "To Sell",
-                ordertype || null
+                s.customer_name,
+                s.dc_no,
+                emptyToNull(s.dc_date),
+                emptyToNull(s.order_no),
+                emptyToNull(s.order_date),
+                emptyToNull(s.payment_terms),
+                emptyToNull(s.Client_dc_date),
+                emptyToNull(s.despatch_through),
+                s.status || "To Sell",
+                emptyToNull(s.ordertype)
             ]
         );
 
@@ -112,17 +102,17 @@ router.post("/new", async (req, res) => {
         for (const item of items) {
             await conn.query(itemSql, [
                 dcId,
-                item.item_name,
-                item.quantity,
-                item.price || 0,
-                item.sl_no || null,
-                item.hsn || null,
-                item.uom || null
+                emptyToNull(item.item_name),
+                toNum(item.quantity),
+                toNum(item.price),
+                emptyToNull(item.sl_no),
+                emptyToNull(item.hsn),
+                emptyToNull(item.uom)
             ]);
         }
 
         await conn.commit();
-        res.json({ message: "Sales DC created successfully", dcId, dc_no });
+        res.json({ message: "Sales DC created successfully", dcId, dc_no: s.dc_no });
     } catch (error) {
         await conn.rollback();
         console.error("Error creating Sales DC:", error);
@@ -135,21 +125,10 @@ router.post("/new", async (req, res) => {
 // Update Sales DC
 router.put("/update/:dc_no", async (req, res) => {
     const dcNo = decodeURIComponent(req.params.dc_no);
-    const {
-        customer_name,
-        dc_no,
-        dc_date,
-        order_no,
-        order_date,
-        payment_terms,
-        Client_dc_date,
-        despatch_through,
-        status,
-        ordertype,
-        items
-    } = req.body;
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!customer_name || !dc_no || !payment_terms || !items || !items.length) {
+    if (!s.customer_name || !s.dc_no || !s.payment_terms || !items.length) {
         return res.status(400).json({ message: "Customer, Admin DC No, Client DC No and at least one item are required" });
     }
 
@@ -173,16 +152,16 @@ router.put("/update/:dc_no", async (req, res) => {
                  payment_terms=?, Client_dc_date=?, despatch_through=?, status=?, ordertype=?
              WHERE id=?`,
             [
-                customer_name,
-                dc_no,
-                dc_date || null,
-                order_no || null,
-                order_date || null,
-                payment_terms || null,
-                Client_dc_date || null,
-                despatch_through || null,
-                status,
-                ordertype,
+                s.customer_name,
+                s.dc_no,
+                emptyToNull(s.dc_date),
+                emptyToNull(s.order_no),
+                emptyToNull(s.order_date),
+                emptyToNull(s.payment_terms),
+                emptyToNull(s.Client_dc_date),
+                emptyToNull(s.despatch_through),
+                s.status,
+                emptyToNull(s.ordertype),
                 dcId
             ]
         );
@@ -192,7 +171,7 @@ router.put("/update/:dc_no", async (req, res) => {
         for (const item of items) {
             await conn.query(
                 "INSERT INTO sales_dc_items (dc_id, item_name, quantity, price, sl_no, hsn, uom) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [dcId, item.item_name, item.quantity, item.price || 0, item.sl_no || null, item.hsn || null, item.uom || null]
+                [dcId, emptyToNull(item.item_name), toNum(item.quantity), toNum(item.price), emptyToNull(item.sl_no), emptyToNull(item.hsn), emptyToNull(item.uom)]
             );
         }
 

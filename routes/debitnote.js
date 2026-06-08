@@ -4,6 +4,16 @@ const db = require("../config/database");
 const axios = require("axios");
 const ExcelJS = require("exceljs");
 
+(async () => {
+  try {
+    await db.promise().query(
+      "ALTER TABLE debit_notes ADD COLUMN delivery_charge DECIMAL(10,2) DEFAULT 0"
+    );
+  } catch (e) {
+    // Column already exists — ignore
+  }
+})();
+
 
 // Auto Gentrate Dn Number function
 
@@ -37,7 +47,7 @@ router.get("/clients/search",async(req,res) =>{
     const searchTerm = `%${q || ""}%`;
     try{
         const[rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ?",
+            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
             [searchTerm]
         );
         res.json(rows);
@@ -52,7 +62,7 @@ router.get("/clients/search",async(req,res) =>{
 router.get("/clients", async (req, res) => {
   try {
     const [rows] = await db.promise().query(
-      "SELECT id, customer_name FROM newclient"
+      "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC"
     );
     res.json(rows);
   } catch (error) {
@@ -123,12 +133,12 @@ router.get("/items/type",async (req, res) => {
 
 router.post('/new',async(req,res)=>{
     try{
-        const{dn_number, client_name, dn_date , bill_no , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, items}=req.body
+        const{dn_number, client_name, dn_date , bill_no , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge, items}=req.body
         const dnNumber = await generateDNNumber();
 
         const[dnResult] = await db.promise().query(
-            'INSERT INTO debit_notes(dn_number, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [dnNumber, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal]
+            'INSERT INTO debit_notes(dn_number, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [dnNumber, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge || 0]
         );
         const dnID = dnResult.insertId;
 
@@ -157,7 +167,7 @@ router.post('/new',async(req,res)=>{
 router.put("/:dnNumber",async(req,res) => {
 const {dnNumber} = req.params;
 try{
-  const{client_name, order_type, dn_date, items, subtotal, cgst, sgst, igst, roundOff, grandTotal, remarks} = req.body;
+  const{client_name, order_type, dn_date, items, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge, remarks} = req.body;
    const[dnRows] = await db.promise().query(
       "SELECT * FROM debit_notes WHERE dn_number = ?",
       [dnNumber]
@@ -166,9 +176,9 @@ try{
     const dnID = dnRows[0].id;
    await db.promise().query(
   `UPDATE debit_notes 
-   SET client_name=?, order_type=?, dn_date=?, subtotal=?, cgst=?, sgst=?, igst=?, roundOff=?, grandTotal=?, remarks=? 
+   SET client_name=?, order_type=?, dn_date=?, subtotal=?, cgst=?, sgst=?, igst=?, roundOff=?, grandTotal=?, delivery_charge=?, remarks=? 
    WHERE id=?`,
-  [client_name, order_type, dn_date, subtotal, cgst, sgst, igst, roundOff, grandTotal, remarks, dnID]
+  [client_name, order_type, dn_date, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge || 0, remarks, dnID]
 );
 
     // Delete existing items
@@ -311,6 +321,7 @@ router.get("/report/filters", async (req, res) => {
     dn.sgst,
     dn.igst,
     dn.grandTotal,
+    dn.delivery_charge,
     dni.item_name,
     dni.quantity,
     dni.price,
@@ -353,6 +364,7 @@ router.get("/report/excel",async(req,res) =>{
     dn.sgst,
     dn.igst,
     dn.grandTotal,
+    dn.delivery_charge,
     dni.item_name,
     dni.quantity,
     dni.price,
@@ -388,6 +400,7 @@ router.get("/report/excel",async(req,res) =>{
     {header: "CGST", key: "cgst", width: 15},
     {header: "SGST", key: "sgst", width: 15},
     {header: "IGST", key: "igst", width: 15},
+    {header: "Delivery Charge", key: "delivery_charge", width: 15},
     {header: "Grand Total", key: "grandTotal", width: 15},
     {header: "Item Name", key: "item_name", width: 20},
     {header: "Quantity", key: "quantity", width: 15},

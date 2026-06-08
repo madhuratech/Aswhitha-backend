@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require("../config/database");
 const axios = require("axios");
 const ExcelJS = require("exceljs");
+const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
 // Auto Generate Quotation Number
 
@@ -31,7 +32,7 @@ router.get("/next-Qt-billno", async (req,res) =>{
 router.get("/clients", async(req, res) => {
     try{
         const[rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient"
+            "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC "
          );
          res.json(rows);
     }catch(error){
@@ -46,7 +47,7 @@ router.get("/clients/search", async(req, res) => {
     const searchTerm = `%${q || ""}%`;
     try{
       const [rows] = await db.promise().query(
-        "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? LIMIT 20",
+        "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
         [searchTerm]
       );
       res.json(rows);
@@ -65,13 +66,13 @@ router.get('/items/search', async(req,res) =>{
     let values = [`%${q || ""}%`];
 
     if(type === "service"){
-        query = "SELECT service_name AS item_name, hsn_number From servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
+        query = "SELECT service_name AS item_name, hsn_number From servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20 ORDER BY service_name ASC ";
     }
     else if(type === "spare"){
-        query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
+        query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ? OR hsn_number LIKE ? LIMIT 20 ORDER BY spare_name ASC";
     } 
     else if(type === "purchase_item"){
-        query = "SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
+        query = "SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ? OR hsn_number LIKE ? LIMIT 20 ORDER BY item_name ASC";
     }
     else{
         return res.status(400).json({message: "Invalid item Type"});
@@ -93,11 +94,11 @@ router.get('/items/:type', async (req, res) => {
   let query = "";
 
   if (type === 'service') {
-    query = "SELECT service_name AS item_name, hsn_number FROM servicesdata";
+    query = "SELECT service_name AS item_name, hsn_number FROM servicesdata ORDER BY service_name ASC";
   } else if (type === 'spare') {
-    query = "SELECT spare_name AS item_name, hsn_number FROM sparedata";
+    query = "SELECT spare_name AS item_name, hsn_number FROM sparedata ORDER BY spare_name ASC ";
   } else if (type === 'purchase_item') {
-    query = "SELECT item_name, hsn_number FROM purchaseitems";
+    query = "SELECT item_name, hsn_number FROM purchaseitems ORDER BY item_name ASC";
   } else {
     return res.status(400).json({ error: "Invalid type parameter" });
   }
@@ -115,30 +116,8 @@ router.get('/items/:type', async (req, res) => {
 
 router.post('/new', async (req, res) => {
   try {
-    const {
-      customer_name,
-      quotation_date,
-      reference,
-      discount,
-      transport,
-      subtotal,
-      cgst,
-      sgst,
-      igst,
-      round_off,
-      grandTotal,
-      tax_text,
-      transport_terms,
-      delivery_period,
-      validity,
-      payment_terms,
-      guarantee_text,
-      pack_frd,
-      waranty,
-      for_sign,
-      items
-    } = req.body;
-
+    const s = sanitizeBody(req.body);
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
     const quotationNumber = await generateQuotationNumber();
 
     const [result] = await db.promise().query(
@@ -146,27 +125,27 @@ router.post('/new', async (req, res) => {
       (customer_name, quotation_no, quotation_date, reference, discount, transport, subtotal, cgst, sgst, igst, round_off, grandTotal, tax_text, transport_terms, delivery_period, validity, payment_terms, guarantee_text, pack_frd, waranty, for_sign) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        customer_name,
+        s.customer_name,
         quotationNumber,
-        quotation_date,
-        reference,
-        discount || 0,
-        transport || 0,
-        subtotal || 0,
-        cgst || 0,
-        sgst || 0,
-        igst || 0,
-        round_off || 0,
-        grandTotal || 0,
-        tax_text,
-        transport_terms,
-        delivery_period,
-        validity,
-        payment_terms,
-        guarantee_text,
-        pack_frd,
-        waranty,
-        for_sign
+        emptyToNull(s.quotation_date),
+        emptyToNull(s.reference),
+        toNum(s.discount),
+        toNum(s.transport),
+        toNum(s.subtotal),
+        toNum(s.cgst),
+        toNum(s.sgst),
+        toNum(s.igst),
+        toNum(s.round_off),
+        toNum(s.grandTotal),
+        emptyToNull(s.tax_text),
+        emptyToNull(s.transport_terms),
+        emptyToNull(s.delivery_period),
+        emptyToNull(s.validity),
+        emptyToNull(s.payment_terms),
+        emptyToNull(s.guarantee_text),
+        emptyToNull(s.pack_frd),
+        emptyToNull(s.waranty),
+        emptyToNull(s.for_sign)
       ]
     );
 
@@ -174,19 +153,18 @@ router.post('/new', async (req, res) => {
 
     // Insert items
     for (const item of items) {
-      const amount = item.price * item.quantity;
-
+      const amount = (item.price || 0) * (item.quantity || 0);
       await db.promise().query(
         `INSERT INTO quotation_items 
         (quotation_id, item_name, price, quantity, part_no, uom, amount) 
         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           quotationId,
-          item.item_name,
-          item.price,
-          item.quantity,
-          item.part_no,
-          item.uom,
+          emptyToNull(item.item_name),
+          toNum(item.price),
+          toNum(item.quantity),
+          emptyToNull(item.part_no),
+          emptyToNull(item.uom),
           amount
         ]
       );
@@ -205,7 +183,8 @@ router.post('/new', async (req, res) => {
 router.put('/update/:quotationNo', async(req, res) => {
     try{
         const {quotationNo} = req.params;
-        const {customer_name, quotation_no, quotation_date, reference, discount, transport, subtotal, cgst, sgst, igst, round_off, grandTotal, tax_text, transport_terms, delivery_period, validity, payment_terms, guarantee_text, pack_frd, waranty, for_sign, items} = req.body;
+        const s = sanitizeBody(req.body);
+        const items = Array.isArray(req.body.items) ? req.body.items : [];
 
         // Get the quotation ID
         const [quotationRows] = await db.promise().query(
@@ -217,7 +196,7 @@ router.put('/update/:quotationNo', async(req, res) => {
         // Update the main quotation
         await db.promise().query(
             "UPDATE quotation SET customer_name=?, quotation_no=?, quotation_date=?, reference=?, discount=?, transport=?, subtotal=?, cgst=?, sgst=?, igst=?, round_off=?, grandTotal=?, tax_text=?, transport_terms=?, delivery_period=?, validity=?, payment_terms=?, guarantee_text=?, pack_frd=?, waranty=?, for_sign=? WHERE id=?",
-            [customer_name, quotation_no, quotation_date, reference, discount, transport, subtotal, cgst, sgst, igst, round_off, grandTotal, tax_text, transport_terms, delivery_period, validity, payment_terms, guarantee_text, pack_frd, waranty, for_sign, quotationId]
+            [s.customer_name, emptyToNull(s.quotation_no), emptyToNull(s.quotation_date), emptyToNull(s.reference), toNum(s.discount), toNum(s.transport), toNum(s.subtotal), toNum(s.cgst), toNum(s.sgst), toNum(s.igst), toNum(s.round_off), toNum(s.grandTotal), emptyToNull(s.tax_text), emptyToNull(s.transport_terms), emptyToNull(s.delivery_period), emptyToNull(s.validity), emptyToNull(s.payment_terms), emptyToNull(s.guarantee_text), emptyToNull(s.pack_frd), emptyToNull(s.waranty), emptyToNull(s.for_sign), quotationId]
         );
 
         // Delete existing items
@@ -228,10 +207,10 @@ router.put('/update/:quotationNo', async(req, res) => {
 
         // Insert updated items
         for(const item of items){
-            const amount = item.price * item.quantity;
+            const amount = (item.price || 0) * (item.quantity || 0);
             await db.promise().query(
                 "INSERT INTO quotation_items (quotation_id, item_name, price, quantity, part_no, uom, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [quotationId, item.item_name, item.price, item.quantity, item.part_no, item.uom, amount]
+                [quotationId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.part_no), emptyToNull(item.uom), amount]
             );
         }
         res.json({message: "Quotation Updated Successfully"});

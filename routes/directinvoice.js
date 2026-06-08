@@ -5,19 +5,39 @@ const axios = require("axios");
 
 // INVOICE GENTRATE
 
-async function InvoiceGentrate(){
-const [rows] = await db.promise().query(
-    "SELECT MAX(id) AS lastId FROM directinvoice"
-);
-let lastId = rows[0].lastId || 0;
-let nextId = lastId + 1;   
-return `AT/INV-${nextId.toString().padStart(3,'0')}`; 
+async function GenerateInvoiceNumber() {
+    const [rows] = await db.promise().query(`
+        SELECT invoice_no FROM salesinvoice
+        UNION ALL
+        SELECT invoice_no FROM service_invoices
+        UNION ALL
+        SELECT invoice_no FROM directinvoice
+    `);
+
+    let maxNumber = 0;
+
+    rows.forEach(row => {
+        if (!row.invoice_no) return;
+
+        const match = row.invoice_no.match(/AT\/INV\/(\d+)/);
+
+        if (match) {
+            maxNumber = Math.max(
+                maxNumber,
+                parseInt(match[1], 10)
+            );
+        }
+    });
+
+    const nextNumber = maxNumber + 1;
+
+    return `AT/INV/${String(nextNumber).padStart(3, "0")}`;
 }
 
 // Get Bill No
 router.get("/next-In-billno", async (req,res) =>{
     try{
-        const InvoiceNumber = await InvoiceGentrate();
+        const InvoiceNumber = await GenerateInvoiceNumber();
         res.json({invoice_no : InvoiceNumber}); 
     }catch(error){
         console.error("Error Generating Invoice Number:", error);
@@ -29,7 +49,7 @@ router.get("/next-In-billno", async (req,res) =>{
 
 router.get("/clients", async (req, res) => {
     try{
-        const [rows] = await db.promise().query("SELECT id, customer_name  FROM newclient");
+        const [rows] = await db.promise().query("SELECT id, customer_name  FROM newclient ORDER BY customer_name ASC");
         res.json(rows);
     }catch(error){
         console.error("Error fetching clients:", error);
@@ -43,7 +63,7 @@ router.get('/clients/search', async(req,res) =>{
     const {q} = req.query;
     try{
         const [rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ?",
+            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
             [`%${q}%`]
         );
         res.json(rows);

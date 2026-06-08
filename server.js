@@ -1,12 +1,20 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-require("./config/database");
+const db = require("./config/database");
+
+// Add client_dc_no column if not already present
+db.promise().query(
+  "ALTER TABLE service_invoices ADD COLUMN client_dc_no VARCHAR(100) DEFAULT ''"
+).catch(() => {});
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+
+app.use(express.json({limit: "200mb"}));
+
+app.use(express.urlencoded({extended: true, limit: "200mb"}));
 
 app.use("/api/customers", require("./routes/ClientRoutes"));
 app.use("/api/employees", require("./routes/employeedata"));
@@ -28,6 +36,11 @@ app.use("/api/servicedcentry", require("./routes/dcEntry"));
 app.use("/api/serviceinvoice", require("./routes/serviceinvoic"));
 app.use("/api/receipts", require("./routes/receipt"));
 app.use("/api/pendings", require("./routes/pending"));
+app.use("/api/creditnotes", require("./routes/creditnote"));
+app.use("/api/pcb-stock", require("./routes/pcbstock"));
+app.use("/api/standby-pcb", require("./routes/standbypcb"));
+app.use("/api/scrappcb", require("./routes/scrappcb"));
+app.use("/api/spareusage", require("./routes/spareusage"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

@@ -61,7 +61,7 @@ router.get("/customer-bills/:customerName", async (req, res) => {
       `SELECT invoice_no AS bill_no, invoice_date AS bill_date, grandtotal  AS bill_amount
        FROM salesinvoice
        WHERE customer_name = ?
-       ORDER BY id DESC`,
+       ORDER BY id ASC`,
       [customerName]
     );
     res.json(rows);
@@ -363,8 +363,36 @@ router.get("/customer-ledger", async (req, res) => {
       invoiceParams
     );
 
+    // Build bill wise payments query
+    const pConditions = [];
+    const paymentParams = [];
+    if (customer_name) {
+      pConditions.push("nc.customer_name = ?");
+      paymentParams.push(customer_name);
+    }
+    if (fromDate && toDate) {
+      pConditions.push("bp.entry_date BETWEEN ? AND ?");
+      paymentParams.push(fromDate, toDate);
+    }
+    const paymentWhere = pConditions.length ? "WHERE " + pConditions.join(" AND ") : "";
+
+    const [payments] = await db.promise().query(
+      `SELECT bpi.bill_no AS bill_no, bp.entry_date AS date,
+          0 AS debit,
+          bpi.paid_amount AS credit,
+          bp.reference_no AS receipt_no,
+          bp.entry_date AS paid_date,
+          CONCAT('Bill Wise Payment', IF(bp.remarks IS NOT NULL AND TRIM(bp.remarks) != '', CONCAT(' (', bp.remarks, ')'), '')) AS payment_mode,
+          '' AS notes, 'bill_wise_payment' AS entry_type
+        FROM billwise_payment_items bpi
+        INNER JOIN billwise_payments bp ON bpi.payment_id = bp.id
+        INNER JOIN newclient nc ON bp.supplier_id = nc.id
+        ${paymentWhere}`,
+      paymentParams
+    );
+
     // Sort by date ascending
-    const combined = [...invoices].sort(
+    const combined = [...invoices, ...payments].sort(
       (a, b) => new Date(a.date) - new Date(b.date)
     );
 
