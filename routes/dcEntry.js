@@ -172,7 +172,7 @@ router.post("/createdc", async (req, res) => {
         emptyToNull(s.dc_date),
         emptyToNull(s.party_dc_no),
         emptyToNull(s.party_dc_date),
-        emptyToNull(s.payment_terms),
+        s.payment_terms || "",
         emptyToNull(s.despatch_through),
         emptyToNull(s.status)
       ]
@@ -227,7 +227,7 @@ router.put("/updatedc/:id", async (req, res) => {
         emptyToNull(s.dc_date),
         emptyToNull(s.party_dc_no),
         emptyToNull(s.party_dc_date),
-        emptyToNull(s.payment_terms),
+        s.payment_terms || "",
         emptyToNull(s.despatch_through),
         emptyToNull(s.status),
         dcId

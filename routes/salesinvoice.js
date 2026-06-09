@@ -84,19 +84,41 @@ router.get('/clients/search', async (req, res) => {
     }
 });
 
-// Sales DC Search — filtered by customer, returns full header info for dropdown
+// Sales DC Search — filtered by customer, only Service remarks, excludes already-invoiced DCs
 router.get('/sales-dc/search', async (req, res) => {
     const { q, customer } = req.query;
-    // Return both admin DC (`dc_no`) and client DC (`payment_terms` as client_dc_no)
-    // Allow searching by either admin DC or client DC number
-    let query = `SELECT dc_no, payment_terms AS client_dc_no, dc_date, Client_dc_date, order_no, order_date, despatch_through, ordertype
-                 FROM sales_dc_entries WHERE (dc_no LIKE ? OR payment_terms LIKE ?)`;
+    // Only return DCs that:
+    //  1. Have at least one item with remarks='Service' (or NULL/empty for backward compat)
+    //  2. Are NOT already linked to a salesinvoice (dc_no not in salesinvoice)
+    let query = `
+        SELECT sde.dc_no, sde.payment_terms AS client_dc_no, sde.dc_date, sde.Client_dc_date,
+               sde.order_no, sde.order_date, sde.despatch_through, sde.ordertype
+        FROM sales_dc_entries sde
+        WHERE (sde.dc_no LIKE ? OR sde.payment_terms LIKE ?)
+        AND EXISTS (
+            SELECT 1 FROM sales_dc_items sdi
+            WHERE sdi.dc_id = sde.id
+            AND (sdi.remarks = 'Service' OR sdi.remarks IS NULL OR sdi.remarks = '')
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM sales_dc_items sdi2
+            WHERE sdi2.dc_id = sde.id AND sdi2.remarks = 'Re Service'
+            AND NOT EXISTS (
+                SELECT 1 FROM sales_dc_items sdi3
+                WHERE sdi3.dc_id = sde.id AND sdi3.remarks = 'Service'
+            )
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM salesinvoice si
+            WHERE si.dc_no = sde.dc_no AND si.dc_no IS NOT NULL AND si.dc_no != ''
+        )
+    `;
     const params = [`%${q || ""}%`, `%${q || ""}%`];
     if (customer) {
-        query += " AND customer_name = ?";
+        query += " AND sde.customer_name = ?";
         params.push(customer);
     }
-    query += " ORDER BY id DESC LIMIT 50";
+    query += " ORDER BY sde.id DESC LIMIT 50";
     try {
         const [rows] = await db.promise().query(query, params);
         res.json(rows);
@@ -410,6 +432,48 @@ router.get('/INV/search', async (req, res) => {
     } catch (error) {
         console.error("Error Searching Sales Invoice:", error);
         res.status(500).json({ message: "Sales Invoice search failed" });
+    }
+});
+
+// Pending Bills Report — invoices where balance > 0 (supports date + customer filters)
+router.get("/report/pending-bills", async (req, res) => {
+    try {
+        const { fromDate, toDate, clientName } = req.query;
+
+        let query = `
+            SELECT
+                si.customer_name,
+                si.invoice_no,
+                si.invoice_date,
+                si.grandtotal AS bill_amount,
+                COALESCE(SUM(ri.paid_amount), 0) AS paid_amount,
+                (si.grandtotal - COALESCE(SUM(ri.paid_amount), 0)) AS balance_amount
+            FROM salesinvoice si
+            LEFT JOIN receipt_items ri ON ri.bill_no = si.invoice_no
+            WHERE 1=1
+        `;
+        const values = [];
+
+        if (fromDate && toDate) {
+            query += " AND si.invoice_date BETWEEN ? AND ?";
+            values.push(fromDate, toDate);
+        }
+        if (clientName) {
+            query += " AND si.customer_name = ?";
+            values.push(clientName);
+        }
+
+        query += `
+            GROUP BY si.id, si.customer_name, si.invoice_no, si.invoice_date, si.grandtotal
+            HAVING (si.grandtotal - COALESCE(SUM(ri.paid_amount), 0)) > 0
+            ORDER BY si.invoice_no ASC
+        `;
+
+        const [rows] = await db.promise().query(query, values);
+        res.json(rows);
+    } catch (error) {
+        console.error("Pending Bills Error:", error);
+        res.status(500).json({ message: "Failed to fetch pending bills" });
     }
 });
 

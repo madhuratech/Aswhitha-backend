@@ -97,7 +97,7 @@ router.post("/new", async (req, res) => {
         );
 
         const dcId = result.insertId;
-        const itemSql = `INSERT INTO sales_dc_items (dc_id, item_name, quantity, price, sl_no, hsn, uom) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+        const itemSql = `INSERT INTO sales_dc_items (dc_id, item_name, quantity, price, sl_no, hsn, uom, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
 
         for (const item of items) {
             await conn.query(itemSql, [
@@ -107,7 +107,8 @@ router.post("/new", async (req, res) => {
                 toNum(item.price),
                 emptyToNull(item.sl_no),
                 emptyToNull(item.hsn),
-                emptyToNull(item.uom)
+                emptyToNull(item.uom),
+                emptyToNull(item.remarks)
             ]);
         }
 
@@ -170,8 +171,8 @@ router.put("/update/:dc_no", async (req, res) => {
 
         for (const item of items) {
             await conn.query(
-                "INSERT INTO sales_dc_items (dc_id, item_name, quantity, price, sl_no, hsn, uom) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [dcId, emptyToNull(item.item_name), toNum(item.quantity), toNum(item.price), emptyToNull(item.sl_no), emptyToNull(item.hsn), emptyToNull(item.uom)]
+                "INSERT INTO sales_dc_items (dc_id, item_name, quantity, price, sl_no, hsn, uom, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [dcId, emptyToNull(item.item_name), toNum(item.quantity), toNum(item.price), emptyToNull(item.sl_no), emptyToNull(item.hsn), emptyToNull(item.uom), emptyToNull(item.remarks)]
             );
         }
 

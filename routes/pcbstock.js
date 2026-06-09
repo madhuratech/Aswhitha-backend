@@ -8,20 +8,20 @@ const db = require("../config/database");
     await db.promise().query(`
       CREATE TABLE IF NOT EXISTS pcb_stock (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        pcb_code VARCHAR(100) UNIQUE NOT NULL,
-        pcb_name VARCHAR(255) NOT NULL,
-        pcb_model VARCHAR(255) NOT NULL,
-        pcb_category VARCHAR(100) NOT NULL,
-        supplier_name VARCHAR(255) NOT NULL,
-        purchase_invoice_no VARCHAR(100) NOT NULL,
-        purchase_date DATE NOT NULL,
-        quantity_received DECIMAL(10,2) NOT NULL,
-        available_quantity DECIMAL(10,2) NOT NULL,
-        minimum_stock_level DECIMAL(10,2) NOT NULL,
-        unit_cost DECIMAL(10,2) NOT NULL,
-        stock_value DECIMAL(12,2) NOT NULL,
-        rack_location VARCHAR(255),
-        status VARCHAR(100) NOT NULL,
+        pcb_code VARCHAR(100) UNIQUE  NULL,
+        pcb_name VARCHAR(255)  NULL,
+        pcb_model VARCHAR(255)  NULL,
+        pcb_category VARCHAR(100)  NULL,
+        supplier_name VARCHAR(255) NULL,
+        supplier_invoice_no VARCHAR(100)  NULL,
+        purchase_date DATE  NULL,
+        quantity_received DECIMAL(10,2)  NULL,
+        available_quantity DECIMAL(10,2) NULL,
+        minimum_stock_level DECIMAL(10,2)  NULL,
+        unit_cost DECIMAL(10,2)  NULL,
+        stock_value DECIMAL(12,2)  NULL,
+        rack_number VARCHAR(255),
+        status VARCHAR(100) NULL,
         remarks TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -53,6 +53,34 @@ router.get("/next-code", async (req, res) => {
   }
 });
 
+
+// Client tab
+router.get("/clients" , async(req,res) =>{
+ try{
+      const [rows] = await db.promise().query(
+          "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC"
+      );
+      res.json(rows);
+  }catch(error){
+      res.status(500).json({message: error.message});
+  }
+});
+
+
+// Get all clients Search 
+router.get('client/search', async(req,res) =>{
+  const {q} = req.query;
+  try{
+    const [rows] = await db.promise().query(
+        "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC",
+        [`%${q}%`]
+      );
+      res.json(rows);
+  }catch(error){
+      res.status(500).json({message: error.message});
+  } 
+})
+
 // Search route for loading entries
 router.get("/search", async (req, res) => {
   const { q } = req.query;
@@ -65,6 +93,31 @@ router.get("/search", async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error("Error searching PCB stock:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Inventory summary for dashboard
+router.get("/summary", async (req, res) => {
+  try {
+    const [[pcbRow]] = await db.promise().query(
+      "SELECT COALESCE(SUM(available_quantity), 0) AS total_pcb_stock FROM pcb_stock"
+    );
+    const [[standbyRow]] = await db.promise().query(`
+      SELECT
+        SUM(status = 'Available') AS standby_available,
+        SUM(status IN ('Allocated', 'Installed')) AS standby_issued,
+        SUM(status = 'Damaged') AS under_repair
+      FROM standby_pcb
+    `);
+    res.json({
+      total_pcb_stock: Number(pcbRow.total_pcb_stock),
+      standby_available: Number(standbyRow.standby_available || 0),
+      standby_issued: Number(standbyRow.standby_issued || 0),
+      under_repair: Number(standbyRow.under_repair || 0),
+    });
+  } catch (err) {
+    console.error("Error fetching inventory summary:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -108,19 +161,19 @@ router.post("/new", async (req, res) => {
       pcb_model,
       pcb_category,
       supplier_name,
-      purchase_invoice_no,
+      supplier_invoice_no,
       purchase_date,
       quantity_received,
       available_quantity,
       minimum_stock_level,
       unit_cost,
       stock_value,
-      rack_location,
+      rack_number,
       status,
       remarks
     } = req.body;
 
-    if (!pcb_name || !pcb_model || !pcb_category || !supplier_name || !purchase_invoice_no || !purchase_date || quantity_received === undefined || available_quantity === undefined || minimum_stock_level === undefined || !unit_cost || !status) {
+    if (!pcb_name || !pcb_model || !pcb_category || !supplier_name || !supplier_invoice_no || !purchase_date || quantity_received === undefined || available_quantity === undefined || minimum_stock_level === undefined || !unit_cost || !status) {
       return res.status(400).json({ message: "Required fields are missing." });
     }
 
@@ -128,24 +181,24 @@ router.post("/new", async (req, res) => {
 
     const [result] = await db.promise().query(
       `INSERT INTO pcb_stock (
-        pcb_code, pcb_name, pcb_model, pcb_category, supplier_name, purchase_invoice_no,
+        pcb_code, pcb_name, pcb_model, pcb_category, supplier_name, supplier_invoice_no,
         purchase_date, quantity_received, available_quantity, minimum_stock_level,
-        unit_cost, stock_value, rack_location, status, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        unit_cost, stock_value, rack_number, status, remarks
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         pcb_code,
         pcb_name,
         pcb_model,
         pcb_category,
         supplier_name,
-        purchase_invoice_no,
+        supplier_invoice_no,
         purchase_date,
         quantity_received,
         available_quantity,
         minimum_stock_level,
         unit_cost,
         stock_value,
-        rack_location,
+        rack_number,
         status,
         remarks
       ]
@@ -167,25 +220,25 @@ router.put("/:pcbCode", async (req, res) => {
       pcb_model,
       pcb_category,
       supplier_name,
-      purchase_invoice_no,
+      supplier_invoice_no,
       purchase_date,
       quantity_received,
       available_quantity,
       minimum_stock_level,
       unit_cost,
       stock_value,
-      rack_location,
+      rack_number,
       status,
       remarks
     } = req.body;
 
-    if (!pcb_name || !pcb_model || !pcb_category || !supplier_name || !purchase_invoice_no || !purchase_date || quantity_received === undefined || available_quantity === undefined || minimum_stock_level === undefined || !unit_cost || !status) {
+    if (!pcb_name || !pcb_model || !pcb_category || !supplier_name || !supplier_invoice_no || !purchase_date || quantity_received === undefined || available_quantity === undefined || minimum_stock_level === undefined || !unit_cost || !status) {
       return res.status(400).json({ message: "Required fields are missing." });
     }
 
     await db.promise().query(
       `UPDATE pcb_stock SET 
-        pcb_name = ?, pcb_model = ?, pcb_category = ?, supplier_name = ?, purchase_invoice_no = ?,
+        pcb_name = ?, pcb_model = ?, pcb_category = ?, supplier_name = ?, supplier_invoice_no = ?,
         purchase_date = ?, quantity_received = ?, available_quantity = ?, minimum_stock_level = ?,
         unit_cost = ?, stock_value = ?, rack_location = ?, status = ?, remarks = ?
       WHERE pcb_code = ?`,
@@ -194,14 +247,14 @@ router.put("/:pcbCode", async (req, res) => {
         pcb_model,
         pcb_category,
         supplier_name,
-        purchase_invoice_no,
+        supplier_invoice_no,
         purchase_date,
         quantity_received,
         available_quantity,
         minimum_stock_level,
         unit_cost,
         stock_value,
-        rack_location,
+        rack_number,
         status,
         remarks,
         pcbCode

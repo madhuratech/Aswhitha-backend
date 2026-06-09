@@ -98,7 +98,7 @@ router.post("/new", async (req, res) => {
     for (const item of items) {
      await db.promise().query(
         "INSERT INTO inward_items (inward_id, item_name, hsn, quantity, unit, pcb_sl_no, problems, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [newInwardEntryId, emptyToNull(item.item_name), emptyToNull(item.hsn), toNum(item.quantity, null), emptyToNull(item.unit), emptyToNull(item.pcb_sl_no), emptyToNull(item.problems), emptyToNull(item.remarks)]
+        [newInwardEntryId, emptyToNull(item.item_name), emptyToNull(item.hsn), toNum(item.quantity, null), emptyToNull(item.unit), emptyToNull(item.pcb_sl_no), item.problems || '', emptyToNull(item.remarks)]
      );
     }
     res.status(201).json({ message: "Inward Entry created successfully" });
@@ -134,7 +134,7 @@ router.put("/update/:dc_number", async (req, res) => {
     for (const item of items) {
       await db.promise().query(
         "INSERT INTO inward_items (inward_id, item_name, hsn, quantity, unit, pcb_sl_no, problems, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [inwardId, emptyToNull(item.item_name), emptyToNull(item.hsn), toNum(item.quantity, null), emptyToNull(item.unit), emptyToNull(item.pcb_sl_no), emptyToNull(item.problems), emptyToNull(item.remarks)]
+        [inwardId, emptyToNull(item.item_name), emptyToNull(item.hsn), toNum(item.quantity, null), emptyToNull(item.unit), emptyToNull(item.pcb_sl_no), item.problems || '', emptyToNull(item.remarks)]
       );
     }
 

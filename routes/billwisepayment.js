@@ -14,6 +14,23 @@ const db      = require("../config/database");
       // Column already exists — ignore
     }
   }
+
+  // Also add bank_name and reference_number / reference_no if missing
+  const extraCols = [
+    { table: "billwise_payments", col: "bank_name", type: "VARCHAR(100)" },
+    { table: "billwise_payments", col: "reference_no", type: "VARCHAR(100)" },
+    { table: "billwise_payments", col: "reference_number", type: "VARCHAR(100)" },
+    { table: "billwise_payment_items", col: "bank_name", type: "VARCHAR(100)" },
+    { table: "billwise_payment_items", col: "reference_number", type: "VARCHAR(100)" },
+    { table: "billwise_payment_items", col: "reference_no", type: "VARCHAR(100)" }
+  ];
+  for (const item of extraCols) {
+    try {
+      await db.promise().query(
+        `ALTER TABLE ${item.table} ADD COLUMN ${item.col} ${item.type} DEFAULT NULL`
+      );
+    } catch (e) {}
+  }
 })();
 
 // ── GET suppliers who have Tax Purchase Entry bills ────────────────────────
@@ -104,9 +121,9 @@ router.post("/new", async (req, res) => {
 
     const [result] = await db.promise().query(
       `INSERT INTO billwise_payments
-         (entry_date, supplier_id, bank_name, reference_no, remarks, grand_total)
-       VALUES (?, (SELECT id FROM newclient WHERE customer_name = ? LIMIT 1), ?, ?, ?, ?)`,
-      [entry_date, supplier_name, bank_name, reference_no, remarks, Number(grand_total) || 0]
+         (entry_date, supplier_id, bank_name, reference_no, reference_number, remarks, grand_total)
+       VALUES (?, (SELECT id FROM newclient WHERE customer_name = ? LIMIT 1), ?, ?, ?, ?, ?)`,
+      [entry_date, supplier_name, bank_name, reference_no || '', reference_no || '', remarks, Number(grand_total) || 0]
     );
     const paymentId = result.insertId;
 
@@ -114,8 +131,8 @@ router.post("/new", async (req, res) => {
       await db.promise().query(
         `INSERT INTO billwise_payment_items
            (payment_id, bill_no, bill_date, bill_amount, paid_amount,
-            balance_amount, payment_mode, tds_amount, delivery_charge)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            balance_amount, payment_mode, tds_amount, delivery_charge, bank_name, reference_no, reference_number)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           paymentId,
           item.bill_no,
@@ -126,6 +143,9 @@ router.post("/new", async (req, res) => {
           item.payment_mode,
           item.tds_amount       || 0,
           item.delivery_charge  || 0,
+          bank_name || '',
+          reference_no || '',
+          reference_no || '',
         ]
       );
     }
@@ -153,9 +173,9 @@ router.put("/update/:id", async (req, res) => {
     await db.promise().query(
       `UPDATE billwise_payments
        SET entry_date=?, supplier_id=(SELECT id FROM newclient WHERE customer_name=? LIMIT 1),
-           bank_name=?, reference_no=?, remarks=?, grand_total=?
+           bank_name=?, reference_no=?, reference_number=?, remarks=?, grand_total=?
        WHERE id=?`,
-      [entry_date, supplier_name, bank_name, reference_no, remarks, grand_total, id]
+      [entry_date, supplier_name, bank_name, reference_no || '', reference_no || '', remarks, grand_total, id]
     );
 
     await db.promise().query(
@@ -166,8 +186,8 @@ router.put("/update/:id", async (req, res) => {
       await db.promise().query(
         `INSERT INTO billwise_payment_items
            (payment_id, bill_no, bill_date, bill_amount, paid_amount,
-            balance_amount, payment_mode, tds_amount, delivery_charge)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            balance_amount, payment_mode, tds_amount, delivery_charge, bank_name, reference_no, reference_number)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           item.bill_no,
@@ -178,6 +198,9 @@ router.put("/update/:id", async (req, res) => {
           item.payment_mode,
           item.tds_amount       || 0,
           item.delivery_charge  || 0,
+          bank_name || '',
+          reference_no || '',
+          reference_no || '',
         ]
       );
     }
@@ -265,7 +288,7 @@ router.get("/report/filters", async (req, res) => {
       SELECT
         bpi.bill_no, bpi.bill_date, bpi.bill_amount, bpi.paid_amount,
         bpi.balance_amount, bpi.tds_amount, bpi.delivery_charge,
-        bp.entry_date, bp.reference_no, bp.remarks, bp.grand_total,
+        bp.entry_date, bp.reference_no, bp.bank_name, bp.remarks, bp.grand_total,
         nc.customer_name AS supplier_name
       FROM billwise_payment_items bpi
       LEFT JOIN billwise_payments bp ON bpi.payment_id = bp.id

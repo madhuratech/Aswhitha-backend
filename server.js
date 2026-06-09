@@ -8,6 +8,11 @@ db.promise().query(
   "ALTER TABLE service_invoices ADD COLUMN client_dc_no VARCHAR(100) DEFAULT ''"
 ).catch(() => {});
 
+// Add remarks column to sales_dc_items if not already present
+db.promise().query(
+  "ALTER TABLE sales_dc_items ADD COLUMN remarks VARCHAR(100) DEFAULT NULL"
+).catch(() => {});
+
 const app = express();
 
 app.use(cors());

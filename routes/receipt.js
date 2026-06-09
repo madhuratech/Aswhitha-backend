@@ -2,6 +2,35 @@ const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 
+// ── DB migration: add bank_name & reference_number if not present ──────────
+(async () => {
+  const tables = ["receipts", "receipt_items"];
+  const cols = ["bank_name", "reference_number"];
+  for (const table of tables) {
+    for (const col of cols) {
+      try {
+        await db.promise().query(
+          `ALTER TABLE ${table} ADD COLUMN ${col} VARCHAR(100) DEFAULT NULL`
+        );
+      } catch (e) {
+        // Ignore column already exists errors
+      }
+    }
+  }
+  // Also add payment_mode and remarks to receipt_items if not present
+  const receiptItemsExtra = [
+    { name: "payment_mode", type: "VARCHAR(100)" },
+    { name: "remarks", type: "VARCHAR(255)" }
+  ];
+  for (const col of receiptItemsExtra) {
+    try {
+      await db.promise().query(
+        `ALTER TABLE receipt_items ADD COLUMN ${col.name} ${col.type} DEFAULT NULL`
+      );
+    } catch (e) {}
+  }
+})();
+
 // Auto-generate Receipt Number
 async function generateReceiptNo() {
   const [rows] = await db.promise().query(
@@ -78,26 +107,31 @@ router.post("/new", async (req, res) => {
       receipt_no, receipt_date, customer_name,
       payment_mode, bank_name, cheque_no, cheque_date,
       total, force_amount, other_deductions, grand_total, remarks,
-      items
+      items, reference_number
     } = req.body;
+
+    const header_payment_mode = payment_mode || (items && items[0]?.payment_mode) || "";
+    const header_bank_name = bank_name || (items && items[0]?.bank_name) || "";
+    const header_reference_number = reference_number || cheque_no || (items && items[0]?.reference_number) || "";
 
     const [result] = await db.promise().query(
       `INSERT INTO receipts
        (receipt_no, receipt_date, customer_name, payment_mode, bank_name, cheque_no, cheque_date,
-        total, force_amount, other_deductions, grand_total, remarks)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [receipt_no, receipt_date, customer_name, payment_mode, bank_name,
-       cheque_no || null, cheque_date || null,
-       total || 0, force_amount || 0, other_deductions || 0, grand_total || 0, remarks || ""]
+        total, force_amount, other_deductions, grand_total, remarks, reference_number)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [receipt_no, receipt_date, customer_name, header_payment_mode, header_bank_name,
+       cheque_no || '', cheque_date || null,
+       total || 0, force_amount || 0, other_deductions || 0, grand_total || 0, remarks || "", header_reference_number]
     );
 
     const receiptId = result.insertId;
 
     for (const item of items) {
       await db.promise().query(
-        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [receiptId, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance]
+        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [receiptId, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance,
+         item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
       );
     }
 
@@ -115,28 +149,33 @@ router.put("/update/:id", async (req, res) => {
     const {
       receipt_date, customer_name, payment_mode, bank_name,
       cheque_no, cheque_date, total, force_amount, other_deductions,
-      grand_total, remarks, items
+      grand_total, remarks, items, reference_number
     } = req.body;
+
+    const header_payment_mode = payment_mode || (items && items[0]?.payment_mode) || "";
+    const header_bank_name = bank_name || (items && items[0]?.bank_name) || "";
+    const header_reference_number = reference_number || cheque_no || (items && items[0]?.reference_number) || "";
 
     await db.promise().query(
       `UPDATE receipts SET
        receipt_date=?, customer_name=?, payment_mode=?, bank_name=?,
        cheque_no=?, cheque_date=?, total=?, force_amount=?, other_deductions=?,
-       grand_total=?, remarks=?
+       grand_total=?, remarks=?, reference_number=?
        WHERE id=?`,
-      [receipt_date, customer_name, payment_mode, bank_name,
-       cheque_no || null, cheque_date || null,
+      [receipt_date, customer_name, header_payment_mode, header_bank_name,
+       cheque_no || '', cheque_date || null,
        total || 0, force_amount || 0, other_deductions || 0,
-       grand_total || 0, remarks || "", id]
+       grand_total || 0, remarks || "", header_reference_number, id]
     );
 
     await db.promise().query("DELETE FROM receipt_items WHERE receipt_id=?", [id]);
 
     for (const item of items) {
       await db.promise().query(
-        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [id, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance]
+        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance,
+         item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
       );
     }
 
@@ -203,6 +242,7 @@ router.get("/report/filters", async (req, res) => {
         r.customer_name,
         r.payment_mode,
         r.bank_name,
+        r.reference_number,
         r.total,
         r.grand_total,
         r.remarks,
@@ -228,7 +268,7 @@ router.get("/report/filters", async (req, res) => {
     }
 
     query += ` GROUP BY r.id, r.receipt_no, r.receipt_date, r.customer_name,
-               r.payment_mode, r.bank_name, r.total, r.grand_total, r.remarks
+               r.payment_mode, r.bank_name, r.reference_number, r.total, r.grand_total, r.remarks
                ORDER BY r.receipt_date DESC, r.id DESC`;
 
     const [rows] = await db.promise().query(query, values);
@@ -354,6 +394,8 @@ router.get("/customer-ledger", async (req, res) => {
           IFNULL(GROUP_CONCAT(DISTINCT r.receipt_no ORDER BY r.receipt_date SEPARATOR ', '), '') AS receipt_no,
           IFNULL(GROUP_CONCAT(DISTINCT r.receipt_date ORDER BY r.receipt_date SEPARATOR ', '), '') AS paid_date,
           IFNULL(GROUP_CONCAT(DISTINCT NULLIF(TRIM(CONCAT_WS(' ', r.bank_name, r.remarks)),'') ORDER BY r.receipt_date SEPARATOR ', '), '') AS payment_mode,
+          IFNULL(GROUP_CONCAT(DISTINCT r.bank_name ORDER BY r.receipt_date SEPARATOR ', '), '') AS bank_name,
+          IFNULL(GROUP_CONCAT(DISTINCT r.reference_number ORDER BY r.receipt_date SEPARATOR ', '), '') AS reference_number,
           IFNULL(inv.payment_terms,'') AS notes, 'invoice' AS entry_type
         FROM salesinvoice inv
         LEFT JOIN receipt_items ri ON ri.bill_no = inv.invoice_no
@@ -383,6 +425,8 @@ router.get("/customer-ledger", async (req, res) => {
           bp.reference_no AS receipt_no,
           bp.entry_date AS paid_date,
           CONCAT('Bill Wise Payment', IF(bp.remarks IS NOT NULL AND TRIM(bp.remarks) != '', CONCAT(' (', bp.remarks, ')'), '')) AS payment_mode,
+          bp.bank_name AS bank_name,
+          bp.reference_no AS reference_number,
           '' AS notes, 'bill_wise_payment' AS entry_type
         FROM billwise_payment_items bpi
         INNER JOIN billwise_payments bp ON bpi.payment_id = bp.id
@@ -432,7 +476,7 @@ router.get("/customer-ledger", async (req, res) => {
         .map((inv) => {
           const paid = paidMap[inv.bill_no] || 0;
           const bal = Number(inv.bill_amount) - paid;
-          return { bill_no: inv.bill_no, date: inv.date, bill_amount: Number(inv.bill_amount), paid_amount: paid, balance: bal };
+          return { bill_no: inv.bill_no, date: inv.date, bill_amount: Number(inv.bill_amount), paid_amount: paid, balance: bal, bank_name: "", reference_number: "" };
         })
         .filter((inv) => inv.balance > 0);
 
@@ -463,11 +507,12 @@ router.get("/report/vouchers", async (req, res) => {
     let query = `
       SELECT
         r.id, r.receipt_no, r.receipt_date, r.customer_name,
-        r.payment_mode, r.bank_name, r.total, r.grand_total,
+        r.payment_mode, r.bank_name, r.reference_number, r.total, r.grand_total,
         r.other_deductions, r.force_amount, r.remarks,
         nc.address, nc.gst_number, nc.phone,
         ri.id AS item_id, ri.bill_no, ri.bill_date,
-        ri.bill_amount, ri.paid_amount, ri.balance
+        ri.bill_amount, ri.paid_amount, ri.balance,
+        ri.payment_mode AS item_payment_mode, ri.bank_name AS item_bank_name, ri.reference_number AS item_reference_number, ri.remarks AS item_remarks
       FROM receipts r
       INNER JOIN receipt_items ri ON r.id = ri.receipt_id
       LEFT JOIN newclient nc ON nc.customer_name = r.customer_name
@@ -498,6 +543,7 @@ router.get("/report/vouchers", async (req, res) => {
           customer_name: row.customer_name,
           payment_mode: row.payment_mode,
           bank_name: row.bank_name,
+          reference_number: row.reference_number,
           total: row.total,
           grand_total: row.grand_total,
           other_deductions: row.other_deductions,
@@ -516,6 +562,10 @@ router.get("/report/vouchers", async (req, res) => {
         bill_amount: row.bill_amount,
         paid_amount: row.paid_amount,
         balance: row.balance,
+        payment_mode: row.item_payment_mode,
+        bank_name: row.item_bank_name,
+        reference_number: row.item_reference_number,
+        remarks: row.item_remarks
       });
     }
 

@@ -121,7 +121,8 @@ router.get("/clients/search", async (req, res) => {
 });
 
 
-// Service DC Search — returns client (party) DC numbers
+// Service DC Search — returns Admin DC numbers (inward_dc_no) for dropdown
+// Filters: status='Service', items have remarks='Service'/'Services', matching customer
 
 router.get("/service-dc/search", async (req, res) => {
 
@@ -130,20 +131,24 @@ router.get("/service-dc/search", async (req, res) => {
     const q = req.query.q || "";
     const supplier = req.query.supplier || "";
 
-    let query = `SELECT party_dc_no, inward_dc_no
-       FROM service_dc_entries
-       WHERE status = 'Service'
-       AND party_dc_no IS NOT NULL
-       AND party_dc_no != ''
-       AND party_dc_no LIKE ?`;
+    let query = `SELECT sde.inward_dc_no, sde.party_dc_no
+       FROM service_dc_entries sde
+       WHERE sde.status = 'Service'
+       AND sde.inward_dc_no IS NOT NULL
+       AND sde.inward_dc_no LIKE ?
+       AND EXISTS (
+           SELECT 1 FROM service_dc_items sdi
+           WHERE sdi.service_dc_id = sde.id
+           AND (sdi.remarks = 'Service' OR sdi.remarks = 'Services')
+       )`;
     const params = [`%${q}%`];
 
     if (supplier) {
-      query += " AND supplier_name = ?";
+      query += " AND sde.supplier_name = ?";
       params.push(supplier);
     }
 
-    query += " ORDER BY id DESC";
+    query += " ORDER BY sde.id DESC";
 
     const [rows] = await db.promise().query(query, params);
 
@@ -156,6 +161,52 @@ router.get("/service-dc/search", async (req, res) => {
     res.status(500).json({
       message: "Server Error"
     });
+
+  }
+
+});
+
+
+// Fetch Service DC Full Data by Admin DC number (inward_dc_no)
+// Used by Service Invoice to look up DC after Admin DC dropdown selection
+
+router.get("/service-dc/by-admin/:adminDcNo", async (req, res) => {
+
+  try {
+
+    const { adminDcNo } = req.params;
+
+    const [headerRows] = await db.promise().query(
+      `SELECT *
+       FROM service_dc_entries
+       WHERE inward_dc_no = ?
+       AND status = 'Service'
+       LIMIT 1`,
+      [adminDcNo]
+    );
+
+    if (!headerRows.length) {
+      return res.status(404).json({ message: "DC Not Found" });
+    }
+
+    const header = headerRows[0];
+
+    const [items] = await db.promise().query(
+      `SELECT item_name, quantity, received_qty, serial_no, uom,
+              hsn AS hsn_number, remarks
+       FROM service_dc_items
+       WHERE service_dc_id = ?
+       AND (remarks = 'Service' OR remarks = 'Services')`,
+      [header.id]
+    );
+
+    res.json({ header, items });
+
+  } catch (error) {
+
+    console.log(error);
+
+    res.status(500).json({ message: "Server Error" });
 
   }
 
