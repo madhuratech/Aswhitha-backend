@@ -91,7 +91,7 @@ router.post("/new", async (req, res) => {
                 emptyToNull(s.payment_terms),
                 emptyToNull(s.Client_dc_date),
                 emptyToNull(s.despatch_through),
-                s.status || "To Sell",
+                s.status,
                 emptyToNull(s.ordertype)
             ]
         );

@@ -47,7 +47,11 @@ router.get("/clients/search", async (req, res) => {
 router.get("/client-dc-list", async (req, res) => {
   try {
     const { client, q } = req.query;
-    let query = "SELECT dc_number, dc_date FROM inward_entry WHERE 1=1";
+    let query = ` SELECT ie.dc_number, ie.dc_date 
+    FROM inward_entry ie WHERE NOT EXISTS (
+   SELECT 1
+   FROM service_dc_entries sde
+   WHERE sde.party_dc_no = ie.dc_number)`
     const params = [];
     if (client) { query += " AND supplier_name = ?"; params.push(client); }
     if (q) { query += " AND dc_number LIKE ?"; params.push(`%${q}%`); }
@@ -162,6 +166,16 @@ router.post("/createdc", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
+    // Determine workflow status: service-type DCs enter "Pending Invoice" state
+    const hasServiceItem = items.some(item => {
+      const r = (item.remarks || "").trim().toLowerCase();
+      return r === "service" || r === "services";
+    });
+    const incomingStatus = (s.status || "").trim();
+    const dcStatus = (incomingStatus === "Service" || hasServiceItem)
+      ? "Pending Invoice"
+      : (incomingStatus || null);
+
     const [result] = await db.promise().query(
       `INSERT INTO service_dc_entries
       (supplier_name, inward_dc_no, dc_date, party_dc_no, party_dc_date, payment_terms, despatch_through, status)
@@ -174,20 +188,34 @@ router.post("/createdc", async (req, res) => {
         emptyToNull(s.party_dc_date),
         s.payment_terms || "",
         emptyToNull(s.despatch_through),
-        emptyToNull(s.status)
+        dcStatus
       ]
     );
 
     const newDcEntryId = result.insertId;
 
+    // Mark the originating inward entry as "DC Created" so it no longer appears in DC creation screen
+    if (s.party_dc_no) {
+      try {
+        await db.promise().query(
+          `UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`,
+          [s.party_dc_no]
+        );
+      } catch (_) {
+        // Column may not exist yet — safe to ignore
+      }
+    }
+
     for (const item of items) {
       await db.promise().query(
         `INSERT INTO service_dc_items
-        (service_dc_id, item_name, quantity, serial_no, received_qty, uom, hsn, remarks)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (service_dc_id, item_name, description, model_no, quantity, serial_no, received_qty, uom, hsn, remarks)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newDcEntryId,
           emptyToNull(item.item_name),
+          emptyToNull(item.description),
+          emptyToNull(item.model_no),
           toNum(item.quantity, null),
           emptyToNull(item.serial_no),
           toNum(item.received_qty),
@@ -240,8 +268,8 @@ router.put("/updatedc/:id", async (req, res) => {
     // Insert updated items
     for (const item of items) {
       await db.promise().query(
-        "INSERT INTO service_dc_items (service_dc_id, item_name, quantity, serial_no, received_qty, uom, hsn, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [dcId, emptyToNull(item.item_name), toNum(item.quantity, null), emptyToNull(item.serial_no), toNum(item.received_qty), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks)]
+        "INSERT INTO service_dc_items (service_dc_id, item_name, description, model_no, quantity, serial_no, received_qty, uom, hsn, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [dcId, emptyToNull(item.item_name), emptyToNull(item.description), emptyToNull(item.model_no), toNum(item.quantity, null), emptyToNull(item.serial_no), toNum(item.received_qty), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks)]
       );
     }
 
@@ -539,6 +567,8 @@ router.get("/all", async (req, res) => {
         `SELECT
           id,
           item_name,
+          description,
+          model_no,
           quantity,
           serial_no,
           received_qty,

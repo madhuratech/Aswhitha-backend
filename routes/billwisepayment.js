@@ -20,6 +20,7 @@ const db      = require("../config/database");
     { table: "billwise_payments", col: "bank_name", type: "VARCHAR(100)" },
     { table: "billwise_payments", col: "reference_no", type: "VARCHAR(100)" },
     { table: "billwise_payments", col: "reference_number", type: "VARCHAR(100)" },
+    { table: "billwise_payments", col: "receipt_no", type: "VARCHAR(100)" },
     { table: "billwise_payment_items", col: "bank_name", type: "VARCHAR(100)" },
     { table: "billwise_payment_items", col: "reference_number", type: "VARCHAR(100)" },
     { table: "billwise_payment_items", col: "reference_no", type: "VARCHAR(100)" }
@@ -32,6 +33,24 @@ const db      = require("../config/database");
     } catch (e) {}
   }
 })();
+
+// Auto-generate Receipt Number
+async function generateReceiptNo() {
+  const [rows] = await db.promise().query(
+    "SELECT MAX(id) AS lastId FROM billwise_payments"
+  );
+  const nextId = (rows[0].lastId || 0) + 1;
+  return `BWP-${String(nextId).padStart(3, "0")}`;
+}
+
+router.get("/next-receipt-no", async (req, res) => {
+  try {
+    const receipt_no = await generateReceiptNo();
+    res.json({ receipt_no });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to generate receipt number" });
+  }
+});
 
 // ── GET suppliers who have Tax Purchase Entry bills ────────────────────────
 router.get("/suppliers-with-bills", async (req, res) => {
@@ -116,14 +135,16 @@ router.post("/new", async (req, res) => {
   try {
     const {
       entry_date, supplier_name, bank_name, reference_no,
-      remarks, grand_total, bank_date, items,
+      remarks, grand_total, bank_date, items, receipt_no,
     } = req.body;
+
+    const finalReceiptNo = receipt_no || await generateReceiptNo();
 
     const [result] = await db.promise().query(
       `INSERT INTO billwise_payments
-         (entry_date, supplier_id, bank_name, reference_no, reference_number, remarks, grand_total)
-       VALUES (?, (SELECT id FROM newclient WHERE customer_name = ? LIMIT 1), ?, ?, ?, ?, ?)`,
-      [entry_date, supplier_name, bank_name, reference_no || '', reference_no || '', remarks, Number(grand_total) || 0]
+         (entry_date, supplier_id, bank_name, reference_no, reference_number, remarks, grand_total, receipt_no)
+       VALUES (?, (SELECT id FROM newclient WHERE customer_name = ? LIMIT 1), ?, ?, ?, ?, ?, ?)`,
+      [entry_date, supplier_name, bank_name, reference_no || '', reference_no || '', remarks, Number(grand_total) || 0, finalReceiptNo]
     );
     const paymentId = result.insertId;
 
@@ -153,6 +174,7 @@ router.post("/new", async (req, res) => {
     res.status(201).json({
       message:    "Bill Wise Payment Created Successfully",
       id:         paymentId,
+      receipt_no: finalReceiptNo,
       bill_no:    items[0]?.bill_no || "",
     });
   } catch (err) {
@@ -167,15 +189,15 @@ router.put("/update/:id", async (req, res) => {
     const { id } = req.params;
     const {
       entry_date, supplier_name, bank_name, reference_no,
-      remarks, grand_total, bank_date, items,
+      remarks, grand_total, bank_date, items, receipt_no,
     } = req.body;
 
     await db.promise().query(
       `UPDATE billwise_payments
        SET entry_date=?, supplier_id=(SELECT id FROM newclient WHERE customer_name=? LIMIT 1),
-           bank_name=?, reference_no=?, reference_number=?, remarks=?, grand_total=?
+           bank_name=?, reference_no=?, reference_number=?, remarks=?, grand_total=?, receipt_no=?
        WHERE id=?`,
-      [entry_date, supplier_name, bank_name, reference_no || '', reference_no || '', remarks, grand_total, id]
+      [entry_date, supplier_name, bank_name, reference_no || '', reference_no || '', remarks, grand_total, receipt_no, id]
     );
 
     await db.promise().query(
@@ -289,6 +311,7 @@ router.get("/report/filters", async (req, res) => {
         bpi.bill_no, bpi.bill_date, bpi.bill_amount, bpi.paid_amount,
         bpi.balance_amount, bpi.tds_amount, bpi.delivery_charge,
         bp.entry_date, bp.reference_no, bp.bank_name, bp.remarks, bp.grand_total,
+        bp.receipt_no,
         nc.customer_name AS supplier_name
       FROM billwise_payment_items bpi
       LEFT JOIN billwise_payments bp ON bpi.payment_id = bp.id

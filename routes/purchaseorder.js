@@ -36,7 +36,7 @@ router.get("/clients/search", async (req, res) => {
   const searchTerm = `%${q || ""}%`;
   try {
     const [rows] = await db.promise().query(
-      "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? LIMIT 20 ORDER BY customer_name ASC",
+      "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC  LIMIT 20 ",
       [searchTerm]
     );
     res.json(rows);

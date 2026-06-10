@@ -10,8 +10,7 @@ async function generateBillNo(){
         "SELECT MAX(id) AS lastId FROM purchase_entry"
     );
     const nextId = (rows[0].lastId || 0) + 1;
-    const year = new Date().getFullYear();
-    return `BILL-${year}-${String(nextId).padStart(3,"0")}`;
+    return `BILL-${String(nextId).padStart(3,"0")}`;
 }
 
 // Get Bill No

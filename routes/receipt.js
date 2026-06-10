@@ -27,7 +27,7 @@ const db = require("../config/database");
       await db.promise().query(
         `ALTER TABLE receipt_items ADD COLUMN ${col.name} ${col.type} DEFAULT NULL`
       );
-    } catch (e) {}
+    } catch (e) { }
   }
 })();
 
@@ -120,8 +120,8 @@ router.post("/new", async (req, res) => {
         total, force_amount, other_deductions, grand_total, remarks, reference_number)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [receipt_no, receipt_date, customer_name, header_payment_mode, header_bank_name,
-       cheque_no || '', cheque_date || null,
-       total || 0, force_amount || 0, other_deductions || 0, grand_total || 0, remarks || "", header_reference_number]
+        cheque_no || '', cheque_date || null,
+        total || 0, force_amount || 0, other_deductions || 0, grand_total || 0, remarks || "", header_reference_number]
     );
 
     const receiptId = result.insertId;
@@ -131,7 +131,7 @@ router.post("/new", async (req, res) => {
         `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [receiptId, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance,
-         item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
+          item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
       );
     }
 
@@ -163,9 +163,9 @@ router.put("/update/:id", async (req, res) => {
        grand_total=?, remarks=?, reference_number=?
        WHERE id=?`,
       [receipt_date, customer_name, header_payment_mode, header_bank_name,
-       cheque_no || '', cheque_date || null,
-       total || 0, force_amount || 0, other_deductions || 0,
-       grand_total || 0, remarks || "", header_reference_number, id]
+        cheque_no || '', cheque_date || null,
+        total || 0, force_amount || 0, other_deductions || 0,
+        grand_total || 0, remarks || "", header_reference_number, id]
     );
 
     await db.promise().query("DELETE FROM receipt_items WHERE receipt_id=?", [id]);
@@ -175,7 +175,7 @@ router.put("/update/:id", async (req, res) => {
         `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance,
-         item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
+          item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
       );
     }
 
@@ -419,19 +419,26 @@ router.get("/customer-ledger", async (req, res) => {
     const paymentWhere = pConditions.length ? "WHERE " + pConditions.join(" AND ") : "";
 
     const [payments] = await db.promise().query(
-      `SELECT bpi.bill_no AS bill_no, bp.entry_date AS date,
-          0 AS debit,
-          bpi.paid_amount AS credit,
-          bp.reference_no AS receipt_no,
-          bp.entry_date AS paid_date,
-          CONCAT('Bill Wise Payment', IF(bp.remarks IS NOT NULL AND TRIM(bp.remarks) != '', CONCAT(' (', bp.remarks, ')'), '')) AS payment_mode,
-          bp.bank_name AS bank_name,
-          bp.reference_no AS reference_number,
-          '' AS notes, 'bill_wise_payment' AS entry_type
-        FROM billwise_payment_items bpi
-        INNER JOIN billwise_payments bp ON bpi.payment_id = bp.id
-        INNER JOIN newclient nc ON bp.supplier_id = nc.id
-        ${paymentWhere}`,
+      `SELECT
+      bpi.bill_no        AS bill_no,
+      bpi.bill_date      AS bill_date,
+      bp.entry_date      AS date,
+      bpi.bill_amount    AS debit,
+      bpi.paid_amount    AS credit,
+      IFNULL(bp.receipt_no, '')          AS receipt_no,
+      bp.entry_date      AS paid_date,
+      IFNULL(bpi.payment_mode, '')       AS payment_mode,
+      IFNULL(bp.bank_name, '')           AS bank_name,
+      IFNULL(bp.reference_no, '')        AS reference_number,
+      nc.customer_name   AS customer_name,
+      ''                 AS notes,
+      'bill_wise_payment' AS entry_type
+   FROM billwise_payment_items bpi
+   INNER JOIN billwise_payments bp
+      ON bpi.payment_id = bp.id
+   INNER JOIN newclient nc
+      ON bp.supplier_id = nc.id
+   ${paymentWhere}`,
       paymentParams
     );
 
@@ -450,38 +457,140 @@ router.get("/customer-ledger", async (req, res) => {
     const totalCredit = entries.reduce((s, r) => s + Number(r.credit), 0);
 
     // Outstanding: invoices that still have unpaid balance
-    if (type === "outstanding") {
-      const paidWhere = customer_name ? "WHERE r.customer_name = ?" : "";
-      const paidParams = customer_name ? [customer_name] : [];
-      const [paidRows] = await db.promise().query(
-        `SELECT bill_no, SUM(paid_amount) AS paid
-         FROM receipt_items ri
-         JOIN receipts r ON r.id = ri.receipt_id
-         ${paidWhere}
-         GROUP BY bill_no`,
-        paidParams
-      );
-      const paidMap = {};
-      paidRows.forEach((r) => { paidMap[r.bill_no] = Number(r.paid); });
 
-      const invWhere = customer_name ? "WHERE customer_name = ?" : "";
-      const invParams = customer_name ? [customer_name] : [];
-      const [allInvoices] = await db.promise().query(
-        `SELECT invoice_no AS bill_no, invoice_date AS date, grandtotal AS bill_amount
-         FROM salesinvoice ${invWhere}`,
-        invParams
-      );
+   if (type === "outstanding") {
 
-      const outstanding = allInvoices
-        .map((inv) => {
-          const paid = paidMap[inv.bill_no] || 0;
-          const bal = Number(inv.bill_amount) - paid;
-          return { bill_no: inv.bill_no, date: inv.date, bill_amount: Number(inv.bill_amount), paid_amount: paid, balance: bal, bank_name: "", reference_number: "" };
-        })
-        .filter((inv) => inv.balance > 0);
+  // Receipt Payments
+  const receiptPaidWhere = customer_name ? "WHERE r.customer_name = ?" : "";
+  const receiptPaidParams = customer_name ? [customer_name] : [];
 
-      return res.json({ customer_name: customer_name || "ALL", type: "outstanding", outstanding });
+  const [receiptPaidRows] = await db.promise().query(
+    `SELECT
+        ri.bill_no,
+        SUM(ri.paid_amount) AS paid
+     FROM receipt_items ri
+     INNER JOIN receipts r
+       ON ri.receipt_id = r.id
+     ${receiptPaidWhere}
+     GROUP BY ri.bill_no`,
+    receiptPaidParams
+  );
+
+  // Bill Wise Payments
+  const bwpWhere = customer_name ? "WHERE nc.customer_name = ?" : "";
+  const bwpParams = customer_name ? [customer_name] : [];
+
+  const [bwpPaidRows] = await db.promise().query(
+    `SELECT
+        bpi.bill_no,
+        SUM(bpi.paid_amount) AS paid
+     FROM billwise_payment_items bpi
+     INNER JOIN billwise_payments bp
+       ON bpi.payment_id = bp.id
+     INNER JOIN newclient nc
+       ON bp.supplier_id = nc.id
+     ${bwpWhere}
+     GROUP BY bpi.bill_no`,
+    bwpParams
+  );
+
+  // Normalize bill number: extract trailing numeric sequence, parse as int to drop leading zeros.
+  // AT/INV/005 → 5,  BILL-005 → 5,  BILL-2026-003 → 3,  AT/INV/003 → 3
+  const normBill = (s) => {
+    const nums = (s || '').match(/\d+/g);
+    if (!nums || nums.length === 0) return (s || '').toLowerCase().replace(/\s/g, '');
+    return String(parseInt(nums[nums.length - 1], 10));
+  };
+
+  // Receipt Map — exact + normalized
+  const receiptPaidMap = {};
+  const receiptPaidNormMap = {};
+  receiptPaidRows.forEach((row) => {
+    const amt = Number(row.paid || 0);
+    receiptPaidMap[row.bill_no] = amt;
+    receiptPaidNormMap[normBill(row.bill_no)] = amt;
+  });
+
+  // Bill Wise Map — exact + normalized
+  const bwpPaidMap = {};
+  const bwpPaidNormMap = {};
+  bwpPaidRows.forEach((row) => {
+    const amt = Number(row.paid || 0);
+    bwpPaidMap[row.bill_no] = amt;
+    bwpPaidNormMap[normBill(row.bill_no)] = amt;
+  });
+
+  console.log("Receipt Map:", receiptPaidMap);
+  console.log("BillWise Map:", bwpPaidMap);
+
+  // Sales Invoices
+  const invWhere = customer_name
+    ? "WHERE customer_name = ?"
+    : "";
+
+  const invParams = customer_name
+    ? [customer_name]
+    : [];
+
+  const [allInvoices] = await db.promise().query(
+    `SELECT
+        invoice_no AS bill_no,
+        invoice_date AS date,
+        grandtotal AS bill_amount
+     FROM salesinvoice
+     ${invWhere}`,
+    invParams
+  );
+
+  const matchedBwpNos = new Set();
+
+  const outstanding = allInvoices
+    .map((inv) => {
+      const normInv = normBill(inv.bill_no);
+
+      // Exact match first, then normalized fallback
+      const receipt_paid = inv.bill_no in receiptPaidMap
+        ? receiptPaidMap[inv.bill_no]
+        : (receiptPaidNormMap[normInv] || 0);
+
+      const bwp_paid = inv.bill_no in bwpPaidMap
+        ? bwpPaidMap[inv.bill_no]
+        : (bwpPaidNormMap[normInv] || 0);
+
+      if (bwp_paid > 0) matchedBwpNos.add(normInv);
+
+      console.log(`[Outstanding] invoice_no=${inv.bill_no} | receipt_paid=${receipt_paid} | bwp_paid=${bwp_paid}`);
+
+      const total_paid = receipt_paid + bwp_paid;
+      const balance = Number(inv.bill_amount) - total_paid;
+
+      return {
+        bill_no: inv.bill_no,
+        date: inv.date,
+        bill_amount: Number(inv.bill_amount),
+
+        receipt_paid: Number(receipt_paid.toFixed(2)),
+        bwp_paid: Number(bwp_paid.toFixed(2)),
+
+        paid_amount: Number(total_paid.toFixed(2)),
+        balance: Number(balance.toFixed(2))
+      };
+    })
+    .filter((row) => row.balance > 0);
+
+  // Log unmatched bill wise payment entries
+  Object.keys(bwpPaidMap).forEach((bno) => {
+    if (!matchedBwpNos.has(normBill(bno))) {
+      console.log(`[BillWise Unmatched] bill_no=${bno} | amount=${bwpPaidMap[bno]}`);
     }
+  });
+
+  return res.json({
+    customer_name: customer_name || "ALL",
+    type: "outstanding",
+    outstanding
+  });
+}
 
     res.json({
       customer_name: customer_name || "ALL",

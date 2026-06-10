@@ -87,38 +87,49 @@ router.get('/clients/search', async (req, res) => {
 // Sales DC Search — filtered by customer, only Service remarks, excludes already-invoiced DCs
 router.get('/sales-dc/search', async (req, res) => {
     const { q, customer } = req.query;
-    // Only return DCs that:
-    //  1. Have at least one item with remarks='Service' (or NULL/empty for backward compat)
-    //  2. Are NOT already linked to a salesinvoice (dc_no not in salesinvoice)
+
     let query = `
-        SELECT sde.dc_no, sde.payment_terms AS client_dc_no, sde.dc_date, sde.Client_dc_date,
-               sde.order_no, sde.order_date, sde.despatch_through, sde.ordertype
+        SELECT
+            sde.dc_no,
+            sde.payment_terms AS client_dc_no,
+            sde.dc_date,
+            sde.Client_dc_date,
+            sde.order_no,
+            sde.order_date,
+            sde.despatch_through,
+            sde.ordertype
         FROM sales_dc_entries sde
-        WHERE (sde.dc_no LIKE ? OR sde.payment_terms LIKE ?)
-        AND EXISTS (
-            SELECT 1 FROM sales_dc_items sdi
-            WHERE sdi.dc_id = sde.id
-            AND (sdi.remarks = 'Service' OR sdi.remarks IS NULL OR sdi.remarks = '')
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM sales_dc_items sdi2
-            WHERE sdi2.dc_id = sde.id AND sdi2.remarks = 'Re Service'
-            AND NOT EXISTS (
-                SELECT 1 FROM sales_dc_items sdi3
-                WHERE sdi3.dc_id = sde.id AND sdi3.remarks = 'Service'
+        WHERE
+            (sde.dc_no LIKE ? OR sde.payment_terms LIKE ?)
+
+            -- Only Service DC
+            AND EXISTS (
+                SELECT 1
+                FROM sales_dc_items sdi
+                WHERE sdi.dc_id = sde.id
+                AND sdi.remarks = 'Service'
             )
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM salesinvoice si
-            WHERE si.dc_no = sde.dc_no AND si.dc_no IS NOT NULL AND si.dc_no != ''
-        )
+
+            -- Hide Completed DC
+            AND (sde.status IS NULL OR sde.status <> 'Completed')
+
+            -- Hide Already Invoiced DC
+            AND NOT EXISTS (
+                SELECT 1
+                FROM salesinvoice si
+                WHERE si.dc_no = sde.dc_no
+            )
     `;
+
     const params = [`%${q || ""}%`, `%${q || ""}%`];
+
     if (customer) {
-        query += " AND sde.customer_name = ?";
+        query += ` AND sde.customer_name = ? `;
         params.push(customer);
     }
-    query += " ORDER BY sde.id DESC LIMIT 50";
+
+    query += ` ORDER BY sde.id DESC LIMIT 50`;
+
     try {
         const [rows] = await db.promise().query(query, params);
         res.json(rows);
@@ -137,9 +148,8 @@ router.get('/sales-dc/:dcNo', async (req, res) => {
         );
         if (!dcRows.length) return res.status(404).json({ message: "DC Not Found" });
         const dcEntry = dcRows[0];
-        const [itemRows] = await db.promise().query(
-            "SELECT * FROM sales_dc_items WHERE dc_id = ?", [dcEntry.id]
-        );
+        const [itemRows] = await db.promise().query(`SELECT * FROM sales_dc_items
+        WHERE dc_id = ? AND remarks='Service'`, [dcEntry.id]);
         res.json({ header: dcEntry, items: itemRows });
     } catch (error) {
         console.error("Sales DC Fetch Error:", error);
@@ -239,6 +249,12 @@ router.post('/new', async (req, res) => {
         );
 
         const invoiceId = result.insertId;
+        if (s.dc_no) {await conn.query(
+        `UPDATE sales_dc_entries SET status='Completed'
+         WHERE dc_no=?`,
+        [s.dc_no]
+    );
+}
 
         const itemSql = `INSERT INTO salesinvoice_items 
                (invoice_id, item_name, price, quantity, uom, hsn_number, amount) 
