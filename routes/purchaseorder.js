@@ -5,6 +5,18 @@ const axios = require('axios');
 const ExcelJS = require("exceljs");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
+// Self-migration: ensure serial_no column exists in purchase_order_items
+(async () => {
+  try {
+    await db.promise().query(
+      "ALTER TABLE purchase_order_items ADD COLUMN serial_no VARCHAR(255) NULL"
+    ).catch(() => {});
+    console.log("purchase_order_items table migrated successfully");
+  } catch (err) {
+    console.error("Error migrating purchase_order_items table:", err.message);
+  }
+})();
+
 
 // generate a random PO number
 async function generatePONumber() {
@@ -36,7 +48,7 @@ router.get("/clients/search", async (req, res) => {
   const searchTerm = `%${q || ""}%`;
   try {
     const [rows] = await db.promise().query(
-      "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC  LIMIT 20 ",
+      "SELECT id, customer_name, state, gst_number FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
       [searchTerm]
     );
     res.json(rows);
@@ -131,8 +143,8 @@ router.post('/new', async (req, res) => {
     for (const item of items) {
       const amount = toNum(item.price) * toNum(item.quantity);
       await db.promise().query(
-        `INSERT INTO purchase_order_items (po_id, item_name, price, quantity, hsn_code, unit, amount) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [poId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.hsn_code), emptyToNull(item.unit), amount]
+        `INSERT INTO purchase_order_items (po_id, item_name, price, quantity, hsn_code, unit, amount, serial_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [poId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.hsn_code), emptyToNull(item.unit), amount, emptyToNull(item.serial_no)]
       );
     }
     res.status(201).json({ message: 'Purchase order created successfully', po_number: poNumber });
@@ -166,8 +178,8 @@ router.put('/:poNumber', async (req, res) => {
     for (const item of items) {
       const amount = toNum(item.price) * toNum(item.quantity);
       await db.promise().query(
-        `INSERT INTO purchase_order_items (po_id, item_name, price, quantity, hsn_code, unit, amount) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [poId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.hsn_code), emptyToNull(item.unit), amount]
+        `INSERT INTO purchase_order_items (po_id, item_name, price, quantity, hsn_code, unit, amount, serial_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [poId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.hsn_code), emptyToNull(item.unit), amount, emptyToNull(item.serial_no)]
       );
     }
     res.json({ message: "Updated successfully" });

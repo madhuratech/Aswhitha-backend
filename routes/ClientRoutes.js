@@ -12,14 +12,10 @@ router.post("/new", (req, res) => {
     customer_type,
     customer_name,
     phone,
-    email,
     address,
-    pincode,
-    contact_person,
   } = s;
 
-  // Only truly required fields are validated
-  if (!customer_type || !customer_name || !phone || !email || !address || !pincode || !contact_person) {
+  if (!customer_type || !customer_name || !phone || !address) {
     return res.status(400).json({ message: "Required fields missing" });
   }
 
@@ -31,7 +27,7 @@ router.post("/new", (req, res) => {
 
   db.query(
     sql,
-    [s.customer_type, s.customer_name, s.phone, s.email, s.address, emptyToNull(s.gst_number), emptyToNull(s.state), s.pincode, s.contact_person],
+    [s.customer_type, s.customer_name, s.phone, emptyToNull(s.email), s.address, emptyToNull(s.gst_number), emptyToNull(s.state), emptyToNull(s.pincode), emptyToNull(s.contact_person)],
     (err, result) => {
       if (err) {
         console.error("DB ERROR:", err);
@@ -122,7 +118,7 @@ router.put("/update/:id", (req,res) => {
    
    db.query(
     sql,
-    [s.customer_name, s.phone, s.email, s.address, emptyToNull(s.gst_number), emptyToNull(s.state), s.pincode, s.contact_person, id],
+    [s.customer_name, s.phone, emptyToNull(s.email), s.address, emptyToNull(s.gst_number), emptyToNull(s.state), emptyToNull(s.pincode), emptyToNull(s.contact_person), id],
     (err) => {
       if(err){
         console.log(err);

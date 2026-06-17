@@ -3,6 +3,18 @@ const router = express.Router();
 const db = require("../config/database");
 const axios = require("axios");
 
+// Self-migration: ensure serial_no column exists in invoice_items
+(async () => {
+  try {
+    await db.promise().query(
+      "ALTER TABLE invoice_items ADD COLUMN serial_no VARCHAR(255) NULL"
+    ).catch(() => {});
+    console.log("invoice_items table migrated successfully");
+  } catch (err) {
+    console.error("Error migrating invoice_items table:", err.message);
+  }
+})();
+
 // INVOICE GENTRATE
 
 async function GenerateInvoiceNumber() {
@@ -19,7 +31,7 @@ async function GenerateInvoiceNumber() {
     rows.forEach(row => {
         if (!row.invoice_no) return;
 
-        const match = row.invoice_no.match(/AT\/INV\/(\d+)/);
+        const match = row.invoice_no.match(/AT\/INV\/?(\d+)/);
 
         if (match) {
             maxNumber = Math.max(
@@ -63,7 +75,7 @@ router.get('/clients/search', async(req,res) =>{
     const {q} = req.query;
     try{
         const [rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
+            "SELECT id, customer_name, state, gst_number FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
             [`%${q}%`]
         );
         res.json(rows);
@@ -132,7 +144,13 @@ router.get('/items/:type', async (req, res) => {
 //   Create New invoice
 
 router.post('/new', async (req, res) => {
-    try{
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+
+    let attempts = 0;
+    const MAX_ATTEMPTS = 3;
+
+    while (attempts < MAX_ATTEMPTS) {
+        attempts++;
         const {
             customer_name,
             invoice_no,
@@ -150,63 +168,67 @@ router.post('/new', async (req, res) => {
             sgst,
             igst,
             round_off,
-            grandtotal,
-            items
+            grandtotal
         } = req.body;
 
-        const [result] = await db.promise().query(
-            `INSERT INTO directinvoice 
-             (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, payment_terms, dispatch_through, discount, transport, subtotal, cgst, sgst, igst, round_off, grandtotal)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                customer_name,
-                invoice_no,
-                invoice_date,
-                dc_no || null,
-                dc_date || null,
-                order_no || null,
-                order_date || null,
-                payment_terms || null,
-                dispatch_through || null,
-                discount || 0,
-                transport || 0,
-                subtotal || 0,
-                cgst || 0,
-                sgst || 0,
-                igst || 0,
-                round_off || 0,
-                grandtotal || 0,
-            ]
-        );
-
-        const invoiceId = result.insertId;
-
-        // Insert Items
-
-        for (const item of items){
-            const amount = item.price * item.quantity;
-
-            await db.promise().query(
-               `INSERT INTO invoice_items 
-               (invoice_id, item_name, price, quantity, uom, hsn_number, amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        try {
+            const [result] = await db.promise().query(
+                `INSERT INTO directinvoice 
+                 (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, payment_terms, dispatch_through, discount, transport, subtotal, cgst, sgst, igst, round_off, grandtotal)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
-                    invoiceId,
-                    item.item_name,
-                    item.price,
-                    item.quantity,
-                    item.uom,
-                    item.hsn_number,
-                    amount
+                    customer_name,
+                    invoice_no,
+                    invoice_date,
+                    dc_no || null,
+                    dc_date || null,
+                    order_no || null,
+                    order_date || null,
+                    payment_terms || null,
+                    dispatch_through || null,
+                    discount || 0,
+                    transport || 0,
+                    subtotal || 0,
+                    cgst || 0,
+                    sgst || 0,
+                    igst || 0,
+                    round_off || 0,
+                    grandtotal || 0,
                 ]
             );
-        }
-        res.json({message: "Invoice Created Successfully", invoiceId});
 
-    }catch(error){
-        console.error("Error Creating Invoice:", error);
-        res.status(500).json({message: "Internal Server Error"});
+            const invoiceId = result.insertId;
+
+            for (const item of items) {
+                const amount = item.price * item.quantity;
+                await db.promise().query(
+                    `INSERT INTO invoice_items 
+                    (invoice_id, item_name, price, quantity, uom, hsn_number, amount, serial_no) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        invoiceId,
+                        item.item_name,
+                        item.price,
+                        item.quantity,
+                        item.uom,
+                        item.hsn_number,
+                        amount,
+                        item.serial_no || null
+                    ]
+                );
+            }
+            return res.json({ message: "Invoice Created Successfully", invoiceId, invoice_no: invoice_no });
+        } catch (error) {
+            if (error.code === 'ER_DUP_ENTRY' && attempts < MAX_ATTEMPTS) {
+                const newNo = await GenerateInvoiceNumber();
+                req.body.invoice_no = newNo;
+                continue;
+            }
+            console.error("Error Creating Invoice:", error);
+            return res.status(500).json({ message: "Internal Server Error" });
+        }
     }
+    res.status(500).json({ message: "Failed to create invoice after multiple attempts" });
 });
 
 // Update Invoice
@@ -277,7 +299,7 @@ router.put('/update/:invoiceNo', async(req, res) => {
         for(const item of items){
             const amount = item.price * item.quantity;
             await db.promise().query(
-                "INSERT INTO invoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO invoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount, serial_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     invoiceId,
                     item.item_name,
@@ -285,7 +307,8 @@ router.put('/update/:invoiceNo', async(req, res) => {
                     item.quantity,
                     item.uom,
                     item.hsn_number,
-                    amount
+                    amount,
+                    item.serial_no || null
                 ]
             );
         }

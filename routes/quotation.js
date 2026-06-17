@@ -5,6 +5,18 @@ const axios = require("axios");
 const ExcelJS = require("exceljs");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
+// Self-migration: ensure serial_no column exists in quotation_items
+(async () => {
+  try {
+    await db.promise().query(
+      "ALTER TABLE quotation_items ADD COLUMN serial_no VARCHAR(255) NULL"
+    ).catch(() => {});
+    console.log("quotation_items table migrated successfully");
+  } catch (err) {
+    console.error("Error migrating quotation_items table:", err.message);
+  }
+})();
+
 // Auto Generate Quotation Number
 
 async function generateQuotationNumber () {
@@ -47,7 +59,7 @@ router.get("/clients/search", async(req, res) => {
     const searchTerm = `%${q || ""}%`;
     try{
       const [rows] = await db.promise().query(
-        "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
+        "SELECT id, customer_name, state, gst_number FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
         [searchTerm]
       );
       res.json(rows);
@@ -156,8 +168,8 @@ router.post('/new', async (req, res) => {
       const amount = (item.price || 0) * (item.quantity || 0);
       await db.promise().query(
         `INSERT INTO quotation_items 
-        (quotation_id, item_name, price, quantity, part_no, uom, amount) 
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (quotation_id, item_name, price, quantity, part_no, uom, amount, serial_no) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           quotationId,
           emptyToNull(item.item_name),
@@ -165,12 +177,13 @@ router.post('/new', async (req, res) => {
           toNum(item.quantity),
           emptyToNull(item.part_no),
           emptyToNull(item.uom),
-          amount
+          amount,
+          emptyToNull(item.serial_no)
         ]
       );
     }
 
-    res.status(201).json({ message: "Quotation Created Successfully" });
+    res.status(201).json({ message: "Quotation Created Successfully", quotation_no: quotationNumber });
 
   } catch (error) {
     console.error("Error Creating Quotation:", error);
@@ -209,8 +222,8 @@ router.put('/update/:quotationNo', async(req, res) => {
         for(const item of items){
             const amount = (item.price || 0) * (item.quantity || 0);
             await db.promise().query(
-                "INSERT INTO quotation_items (quotation_id, item_name, price, quantity, part_no, uom, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [quotationId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.part_no), emptyToNull(item.uom), amount]
+                "INSERT INTO quotation_items (quotation_id, item_name, price, quantity, part_no, uom, amount, serial_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [quotationId, emptyToNull(item.item_name), toNum(item.price), toNum(item.quantity), emptyToNull(item.part_no), emptyToNull(item.uom), amount, emptyToNull(item.serial_no)]
             );
         }
         res.json({message: "Quotation Updated Successfully"});

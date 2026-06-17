@@ -18,7 +18,7 @@ async function GenerateInvoiceNumber() {
     rows.forEach(row => {
         if (!row.invoice_no) return;
 
-        const match = row.invoice_no.match(/AT\/INV\/(\d+)/);
+        const match = row.invoice_no.match(/AT\/INV\/?(\d+)/);
 
         if (match) {
             maxNumber = Math.max(
@@ -44,11 +44,17 @@ router.get("/next-In-billno", async (req, res) => {
     }
 });
 
-// Get All Clients — only those who have a Sales DC entry
+// Get All Clients — from all three invoice types
 router.get("/report/customers", async (req, res) => {
     try {
         const [rows] = await db.promise().query(
-            `SELECT DISTINCT customer_name FROM salesinvoice ORDER BY customer_name ASC`
+            `SELECT DISTINCT customer_name FROM (
+                SELECT customer_name FROM salesinvoice
+                UNION
+                SELECT customer_name FROM service_invoices
+                UNION
+                SELECT customer_name FROM directinvoice
+            ) t ORDER BY customer_name ASC`
         );
         res.json(rows);
     } catch (error) {
@@ -69,12 +75,16 @@ router.get("/clients", async (req, res) => {
     }
 });
 
-// Get All clients Search — only those who have a Sales DC entry
+// Get All clients Search — only those who have a Sales DC entry (includes state/gst_number for GST type detection)
 router.get('/clients/search', async (req, res) => {
     const { q } = req.query;
     try {
         const [rows] = await db.promise().query(
-            `SELECT DISTINCT customer_name FROM sales_dc_entries WHERE customer_name LIKE ? ORDER BY customer_name ASC`,
+            `SELECT DISTINCT sde.customer_name, nc.state, nc.gst_number
+             FROM sales_dc_entries sde
+             LEFT JOIN newclient nc ON nc.customer_name = sde.customer_name
+             WHERE sde.customer_name LIKE ?
+             ORDER BY sde.customer_name ASC`,
             [`%${q}%`]
         );
         res.json(rows);
@@ -84,34 +94,38 @@ router.get('/clients/search', async (req, res) => {
     }
 });
 
-// Sales DC Search — filtered by customer, only Service remarks, excludes already-invoiced DCs
+// Sales DC Search — filtered by customer, only invoice-eligible remarks, excludes already-invoiced DCs
 router.get('/sales-dc/search', async (req, res) => {
     const { q, customer } = req.query;
 
     let query = `
         SELECT
             sde.dc_no,
-            sde.payment_terms AS client_dc_no,
+            sde.customer_name,
             sde.dc_date,
-            sde.Client_dc_date,
             sde.order_no,
             sde.order_date,
             sde.despatch_through,
-            sde.ordertype
+            sde.ordertype,
+            (
+              SELECT GROUP_CONCAT(
+                  CONCAT(sdi2.item_name, ' × ', CAST(sdi2.quantity AS CHAR))
+                  SEPARATOR ' | ')
+              FROM sales_dc_items sdi2
+              WHERE sdi2.dc_id = sde.id
+              AND sdi2.remarks IN ('Serviced', 'For Sale')
+            ) AS items_summary
         FROM sales_dc_entries sde
         WHERE
-            (sde.dc_no LIKE ? OR sde.payment_terms LIKE ?)
+            (sde.dc_no LIKE ? OR sde.order_no LIKE ?)
 
-            -- Only Service DC
+            -- Only invoice-eligible DCs (Serviced / For Sale)
             AND EXISTS (
                 SELECT 1
                 FROM sales_dc_items sdi
                 WHERE sdi.dc_id = sde.id
-                AND sdi.remarks = 'Service'
+                AND sdi.remarks IN ('Serviced', 'For Sale')
             )
-
-            -- Hide Completed DC
-            AND (sde.status IS NULL OR sde.status <> 'Completed')
 
             -- Hide Already Invoiced DC
             AND NOT EXISTS (
@@ -149,8 +163,25 @@ router.get('/sales-dc/:dcNo', async (req, res) => {
         if (!dcRows.length) return res.status(404).json({ message: "DC Not Found" });
         const dcEntry = dcRows[0];
         const [itemRows] = await db.promise().query(`SELECT * FROM sales_dc_items
-        WHERE dc_id = ? AND remarks='Service'`, [dcEntry.id]);
-        res.json({ header: dcEntry, items: itemRows });
+        WHERE dc_id = ? AND remarks IN ('Serviced', 'For Sale')`, [dcEntry.id]);
+
+        const allOrderNos = itemRows.map(item => item.order_no).filter(Boolean);
+        const allOrderDates = itemRows.map(item => {
+            if (!item.order_date) return null;
+            return new Date(item.order_date).toISOString().split("T")[0];
+        }).filter(Boolean);
+
+        const aggregated_order_no = allOrderNos.length
+            ? [...new Set(allOrderNos)].join(", ")
+            : (dcEntry.order_no || "");
+
+        const aggregated_order_date = allOrderDates.length
+            ? [...new Set(allOrderDates)].join(", ")
+            : (dcEntry.order_date
+                ? new Date(dcEntry.order_date).toISOString().split("T")[0]
+                : "");
+
+        res.json({ header: dcEntry, items: itemRows, aggregated_order_no, aggregated_order_date });
     } catch (error) {
         console.error("Sales DC Fetch Error:", error);
         res.status(500).json({ message: "Server Error" });
@@ -211,77 +242,86 @@ router.get('/items/:type', async (req, res) => {
 
 // Create New invoice
 router.post('/new', async (req, res) => {
-    const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!s.customer_name || !s.invoice_no || !s.invoice_date || !items.length) {
+    if (!req.body.customer_name || !req.body.invoice_no || !req.body.invoice_date || !items.length) {
         return res.status(400).json({ message: "Customer, Invoice No, Invoice Date and at least one item are required" });
     }
 
-    const conn = await db.promise().getConnection();
-    try {
-        await conn.beginTransaction();
+    let attempts = 0;
+    const MAX_ATTEMPTS = 3;
 
-        const [result] = await conn.query(
-            `INSERT INTO salesinvoice 
-             (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, payment_terms, dispatch_through, discount, transport, subtotal, cgst, sgst, igst, round_off, grandtotal, ordertype)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                s.customer_name,
-                s.invoice_no,
-                s.invoice_date,
-                emptyToNull(s.dc_no),
-                emptyToNull(s.dc_date),
-                emptyToNull(s.order_no),
-                emptyToNull(s.order_date),
-                emptyToNull(s.payment_terms),
-                emptyToNull(s.dispatch_through),
-                toNum(s.discount),
-                toNum(s.transport),
-                toNum(s.subtotal),
-                toNum(s.cgst),
-                toNum(s.sgst),
-                toNum(s.igst),
-                toNum(s.round_off),
-                toNum(s.grandtotal),
-                emptyToNull(s.ordertype)
-            ]
-        );
+    while (attempts < MAX_ATTEMPTS) {
+        attempts++;
+        const s = sanitizeBody(req.body);
+        const conn = await db.promise().getConnection();
+        try {
+            await conn.beginTransaction();
 
-        const invoiceId = result.insertId;
-        if (s.dc_no) {await conn.query(
-        `UPDATE sales_dc_entries SET status='Completed'
-         WHERE dc_no=?`,
-        [s.dc_no]
-    );
-}
+            const [result] = await conn.query(
+                `INSERT INTO salesinvoice 
+                 (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, dispatch_through, discount, transport, subtotal, cgst, sgst, igst, round_off, grandtotal, ordertype)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    s.customer_name,
+                    s.invoice_no,
+                    s.invoice_date,
+                    emptyToNull(s.dc_no),
+                    emptyToNull(s.dc_date),
+                    emptyToNull(s.order_no),
+                    emptyToNull(s.order_date),
+                    emptyToNull(s.dispatch_through),
+                    toNum(s.discount),
+                    toNum(s.transport),
+                    toNum(s.subtotal),
+                    toNum(s.cgst),
+                    toNum(s.sgst),
+                    toNum(s.igst),
+                    toNum(s.round_off),
+                    toNum(s.grandtotal),
+                    emptyToNull(s.ordertype)
+                ]
+            );
 
-        const itemSql = `INSERT INTO salesinvoice_items 
-               (invoice_id, item_name, price, quantity, uom, hsn_number, amount) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)`;
+            const invoiceId = result.insertId;
 
-        for (const item of items) {
-            const amount = toNum(item.price) * toNum(item.quantity);
-            await conn.query(itemSql, [
-                invoiceId,
-                emptyToNull(item.item_name),
-                toNum(item.price),
-                toNum(item.quantity),
-                emptyToNull(item.uom),
-                emptyToNull(item.hsn_number),
-                amount
-            ]);
+            const itemSql = `INSERT INTO salesinvoice_items
+                   (invoice_id, item_name, price, quantity, uom, hsn_number, amount, order_no, order_date, dc_no, dc_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+            for (const item of items) {
+                const amount = toNum(item.price) * toNum(item.quantity);
+                await conn.query(itemSql, [
+                    invoiceId,
+                    emptyToNull(item.item_name),
+                    toNum(item.price),
+                    toNum(item.quantity),
+                    emptyToNull(item.uom),
+                    emptyToNull(item.hsn_number),
+                    amount,
+                    emptyToNull(item.order_no),
+                    emptyToNull(item.order_date),
+                    emptyToNull(item.dc_no),
+                    emptyToNull(item.dc_date)
+                ]);
+            }
+
+            await conn.commit();
+            return res.json({ message: "Sales Invoice Created Successfully", invoiceId, invoice_no: s.invoice_no });
+        } catch (error) {
+            await conn.rollback();
+            if (error.code === 'ER_DUP_ENTRY' && attempts < MAX_ATTEMPTS) {
+                const newNo = await GenerateInvoiceNumber();
+                req.body.invoice_no = newNo;
+                continue;
+            }
+            console.error("Error Creating Sales Invoice:", error);
+            return res.status(500).json({ message: "Internal Server Error" });
+        } finally {
+            conn.release();
         }
-
-        await conn.commit();
-        res.json({ message: "Sales Invoice Created Successfully", invoiceId });
-    } catch (error) {
-        await conn.rollback();
-        console.error("Error Creating Sales Invoice:", error);
-        res.status(500).json({ message: "Internal Server Error" });
-    } finally {
-        conn.release();
     }
+    res.status(500).json({ message: "Failed to create invoice after multiple attempts" });
 });
 
 // Update Invoice
@@ -309,12 +349,12 @@ router.put('/update/:invoiceNo', async (req, res) => {
         const invoiceId = invoiceRows[0].id;
 
         await conn.query(
-            "UPDATE salesinvoice SET customer_name=?, invoice_no=?, invoice_date=?, dc_no=?, dc_date=?, order_no=?, order_date=?, payment_terms=?, dispatch_through=?, discount=?, transport=?, subtotal=?, cgst=?, sgst=?, igst=?, round_off=?, grandtotal=?, ordertype=? WHERE id=?",
+            "UPDATE salesinvoice SET customer_name=?, invoice_no=?, invoice_date=?, dc_no=?, dc_date=?, order_no=?, order_date=?, dispatch_through=?, discount=?, transport=?, subtotal=?, cgst=?, sgst=?, igst=?, round_off=?, grandtotal=?, ordertype=? WHERE id=?",
             [
                 s.customer_name, s.invoice_no, s.invoice_date,
                 emptyToNull(s.dc_no), emptyToNull(s.dc_date),
                 emptyToNull(s.order_no), emptyToNull(s.order_date),
-                emptyToNull(s.payment_terms), emptyToNull(s.dispatch_through),
+                emptyToNull(s.dispatch_through),
                 toNum(s.discount), toNum(s.transport), toNum(s.subtotal),
                 toNum(s.cgst), toNum(s.sgst), toNum(s.igst),
                 toNum(s.round_off), toNum(s.grandtotal),
@@ -324,7 +364,7 @@ router.put('/update/:invoiceNo', async (req, res) => {
 
         await conn.query("DELETE FROM salesinvoice_items WHERE invoice_id=?", [invoiceId]);
 
-        const itemSql = "INSERT INTO salesinvoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount) VALUES (?, ?, ?, ?, ?, ?, ?)";
+        const itemSql = "INSERT INTO salesinvoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount, order_no, order_date, dc_no, dc_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         for (const item of items) {
             const amount = toNum(item.price) * toNum(item.quantity);
             await conn.query(itemSql, [
@@ -334,7 +374,11 @@ router.put('/update/:invoiceNo', async (req, res) => {
                 toNum(item.quantity),
                 emptyToNull(item.uom),
                 emptyToNull(item.hsn_number),
-                amount
+                amount,
+                emptyToNull(item.order_no || item.client_dc_no),
+                emptyToNull(item.order_date || item.client_dc_date),
+                emptyToNull(item.dc_no),
+                emptyToNull(item.dc_date)
             ]);
         }
 
@@ -423,14 +467,36 @@ router.get('/edit/:invoiceNo', async (req, res) => {
 router.get('/full/:invoiceNo', async (req, res) => {
     try {
         const invoiceNo = decodeURIComponent(req.params.invoiceNo);
-        const [invoiceRows] = await db.promise().query("SELECT * FROM salesinvoice WHERE invoice_no = ?", [invoiceNo]);
-        if (!invoiceRows || invoiceRows.length === 0) return res.status(404).json({ message: "Sales Invoice Not Found" });
-        const invoice = invoiceRows[0];
-        const [itemRows] = await db.promise().query("SELECT * FROM salesinvoice_items WHERE invoice_id = ?", [invoice.id]);
+        let [invoiceRows] = await db.promise().query("SELECT * FROM salesinvoice WHERE invoice_no = ?", [invoiceNo]);
+        
+        let invoice;
+        let itemRows;
+        let isDirect = false;
+
+        if (!invoiceRows || invoiceRows.length === 0) {
+            // Fallback to directinvoice
+            const [directRows] = await db.promise().query("SELECT * FROM directinvoice WHERE invoice_no = ?", [invoiceNo]);
+            if (!directRows || directRows.length === 0) {
+                return res.status(404).json({ message: "Invoice Not Found" });
+            }
+            invoice = directRows[0];
+            isDirect = true;
+        } else {
+            invoice = invoiceRows[0];
+        }
+
+        if (isDirect) {
+            const [rows] = await db.promise().query("SELECT * FROM invoice_items WHERE invoice_id = ?", [invoice.id]);
+            itemRows = rows;
+        } else {
+            const [rows] = await db.promise().query("SELECT * FROM salesinvoice_items WHERE invoice_id = ?", [invoice.id]);
+            itemRows = rows;
+        }
+
         const [clientRows] = await db.promise().query("SELECT * FROM newclient WHERE customer_name = ?", [invoice.customer_name]);
         res.json({ header: invoice, items: itemRows, client: clientRows[0] || {} });
     } catch (error) {
-        console.error("Error Fetching Full Sales Invoice:", error);
+        console.error("Error Fetching Full Invoice:", error);
         res.status(500).json({ message: "Internal Server Error" });
     }
 });
@@ -451,40 +517,89 @@ router.get('/INV/search', async (req, res) => {
     }
 });
 
-// Pending Bills Report — invoices where balance > 0 (supports date + customer filters)
+// Pending Bills Report — invoices where balance > 0 from all three invoice types
 router.get("/report/pending-bills", async (req, res) => {
     try {
         const { fromDate, toDate, clientName } = req.query;
 
-        let query = `
-            SELECT
-                si.customer_name,
-                si.invoice_no,
-                si.invoice_date,
-                si.grandtotal AS bill_amount,
-                COALESCE(SUM(ri.paid_amount), 0) AS paid_amount,
-                (si.grandtotal - COALESCE(SUM(ri.paid_amount), 0)) AS balance_amount
-            FROM salesinvoice si
-            LEFT JOIN receipt_items ri ON ri.bill_no = si.invoice_no
-            WHERE 1=1
+        const filterClause = (dateCol, nameCol) => {
+            const conds = [];
+            if (fromDate && toDate) conds.push(`${dateCol} BETWEEN ? AND ?`);
+            if (clientName) conds.push(`${nameCol} = ?`);
+            return conds.length ? " AND " + conds.join(" AND ") : "";
+        };
+
+        const filterVals = (dateCol) => {
+            const v = [];
+            if (fromDate && toDate) v.push(fromDate, toDate);
+            if (clientName) v.push(clientName);
+            return v;
+        };
+
+        const siFilter = filterClause("si.invoice_date", "si.customer_name");
+        const svFilter = filterClause("sv.invoice_date", "sv.customer_name");
+        const diFilter = filterClause("d.invoice_date", "d.customer_name");
+
+        const query = `
+            SELECT customer_name, invoice_no, invoice_date, bill_amount, paid_amount, balance_amount
+            FROM (
+                SELECT
+                    si.customer_name,
+                    si.invoice_no,
+                    si.invoice_date,
+                    si.grandtotal AS bill_amount,
+                    (
+                      COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = si.invoice_no), 0)
+                      + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = si.invoice_no), 0)
+                    ) AS paid_amount,
+                    (si.grandtotal
+                      - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = si.invoice_no), 0)
+                      - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = si.invoice_no), 0)
+                    ) AS balance_amount
+                FROM salesinvoice si
+                WHERE 1=1 ${siFilter}
+
+                UNION ALL
+
+                SELECT
+                    sv.customer_name,
+                    sv.invoice_no,
+                    sv.invoice_date,
+                    sv.grand_total AS bill_amount,
+                    (
+                      COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = sv.invoice_no), 0)
+                      + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = sv.invoice_no), 0)
+                    ) AS paid_amount,
+                    (sv.grand_total
+                      - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = sv.invoice_no), 0)
+                      - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = sv.invoice_no), 0)
+                    ) AS balance_amount
+                FROM service_invoices sv
+                WHERE 1=1 ${svFilter}
+
+                UNION ALL
+
+                SELECT
+                    d.customer_name,
+                    d.invoice_no,
+                    d.invoice_date,
+                    d.grandtotal AS bill_amount,
+                    (
+                      COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0)
+                      + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0)
+                    ) AS paid_amount,
+                    (d.grandtotal
+                      - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0)
+                      - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0)
+                    ) AS balance_amount
+                FROM directinvoice d
+                WHERE 1=1 ${diFilter}
+            ) combined
+            WHERE balance_amount > 0
+            ORDER BY invoice_no ASC
         `;
-        const values = [];
 
-        if (fromDate && toDate) {
-            query += " AND si.invoice_date BETWEEN ? AND ?";
-            values.push(fromDate, toDate);
-        }
-        if (clientName) {
-            query += " AND si.customer_name = ?";
-            values.push(clientName);
-        }
-
-        query += `
-            GROUP BY si.id, si.customer_name, si.invoice_no, si.invoice_date, si.grandtotal
-            HAVING (si.grandtotal - COALESCE(SUM(ri.paid_amount), 0)) > 0
-            ORDER BY si.invoice_no ASC
-        `;
-
+        const values = [...filterVals(), ...filterVals(), ...filterVals()];
         const [rows] = await db.promise().query(query, values);
         res.json(rows);
     } catch (error) {
@@ -493,57 +608,219 @@ router.get("/report/pending-bills", async (req, res) => {
     }
 });
 
-// Gentrate Report filters
+// Generate Report filters — combines Sales Invoice, Service Invoice, Direct Invoice
 router.get("/report/filters", async (req, res) => {
     try {
         const { fromDate, toDate, invoiceNo, clientName } = req.query;
 
-        let query = `
-        SELECT
-            s.invoice_no,
-            s.invoice_date,
-            s.customer_name,
-            MAX(COALESCE(nc.gst_number, '')) AS gst_no,
-            s.subtotal AS taxable_value,
-            s.cgst AS cgst_amount,
-            s.sgst AS sgst_amount,
-            s.igst AS igst_amount,
-            s.grandtotal AS total_invoice_value,
-            ROUND(CASE WHEN s.subtotal > 0 THEN (s.cgst / s.subtotal) * 100 ELSE 0 END, 2) AS cgst_percent,
-            ROUND(CASE WHEN s.subtotal > 0 THEN (s.sgst / s.subtotal) * 100 ELSE 0 END, 2) AS sgst_percent,
-            ROUND(CASE WHEN s.subtotal > 0 THEN (s.igst / s.subtotal) * 100 ELSE 0 END, 2) AS igst_percent,
-            GROUP_CONCAT(DISTINCT si.hsn_number ORDER BY si.hsn_number SEPARATOR ', ') AS hsn_sac,
-            SUM(si.quantity) AS total_qty
-        FROM salesinvoice s
-        LEFT JOIN salesinvoice_items si ON s.id = si.invoice_id
-        LEFT JOIN newclient nc ON s.customer_name = nc.customer_name
-        WHERE 1=1
+        const buildFilter = (dateCol, nameCol, noCol) => {
+            const conds = [];
+            if (fromDate && toDate) conds.push(`${dateCol} BETWEEN ? AND ?`);
+            if (invoiceNo) conds.push(`${noCol} = ?`);
+            if (clientName) conds.push(`${nameCol} = ?`);
+            return conds.length ? " AND " + conds.join(" AND ") : "";
+        };
+
+        const filterVals = () => {
+            const v = [];
+            if (fromDate && toDate) v.push(fromDate, toDate);
+            if (invoiceNo) v.push(invoiceNo);
+            if (clientName) v.push(clientName);
+            return v;
+        };
+
+        const siFilter = buildFilter("s.invoice_date", "s.customer_name", "s.invoice_no");
+        const svFilter = buildFilter("sv.invoice_date", "sv.customer_name", "sv.invoice_no");
+        const diFilter = buildFilter("d.invoice_date", "d.customer_name", "d.invoice_no");
+
+        const query = `
+            SELECT invoice_no, invoice_date, customer_name, gst_no, taxable_value,
+                   cgst_amount, sgst_amount, igst_amount, total_invoice_value,
+                   cgst_percent, sgst_percent, igst_percent, hsn_sac, total_qty, invoice_type,
+                   paid_amount, balance_amount
+            FROM (
+                SELECT
+                    s.invoice_no,
+                    s.invoice_date,
+                    s.customer_name,
+                    MAX(COALESCE(nc.gst_number, '')) AS gst_no,
+                    s.subtotal AS taxable_value,
+                    s.cgst AS cgst_amount,
+                    s.sgst AS sgst_amount,
+                    s.igst AS igst_amount,
+                    s.grandtotal AS total_invoice_value,
+                    ROUND(CASE WHEN s.subtotal > 0 THEN (s.cgst / s.subtotal) * 100 ELSE 0 END, 2) AS cgst_percent,
+                    ROUND(CASE WHEN s.subtotal > 0 THEN (s.sgst / s.subtotal) * 100 ELSE 0 END, 2) AS sgst_percent,
+                    ROUND(CASE WHEN s.subtotal > 0 THEN (s.igst / s.subtotal) * 100 ELSE 0 END, 2) AS igst_percent,
+                    GROUP_CONCAT(DISTINCT si.hsn_number ORDER BY si.hsn_number SEPARATOR ', ') AS hsn_sac,
+                    SUM(si.quantity) AS total_qty,
+                    'Sales Invoice' AS invoice_type,
+                    (
+                      COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = s.invoice_no), 0)
+                      + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = s.invoice_no), 0)
+                    ) AS paid_amount,
+                    (s.grandtotal
+                      - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = s.invoice_no), 0)
+                      - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = s.invoice_no), 0)
+                    ) AS balance_amount
+                FROM salesinvoice s
+                LEFT JOIN salesinvoice_items si ON s.id = si.invoice_id
+                LEFT JOIN newclient nc ON s.customer_name = nc.customer_name
+                WHERE 1=1 ${siFilter}
+                GROUP BY s.id, s.invoice_no, s.invoice_date, s.customer_name, s.subtotal, s.cgst, s.sgst, s.igst, s.grandtotal
+
+                UNION ALL
+
+                SELECT
+                    sv.invoice_no,
+                    sv.invoice_date,
+                    sv.customer_name,
+                    MAX(COALESCE(nc.gst_number, '')) AS gst_no,
+                    COALESCE(SUM(svi.amount), 0) AS taxable_value,
+                    sv.cgst AS cgst_amount,
+                    sv.sgst AS sgst_amount,
+                    sv.igst AS igst_amount,
+                    sv.grand_total AS total_invoice_value,
+                    ROUND(CASE WHEN COALESCE(SUM(svi.amount), 0) > 0 THEN (sv.cgst / COALESCE(SUM(svi.amount), 0)) * 100 ELSE 0 END, 2) AS cgst_percent,
+                    ROUND(CASE WHEN COALESCE(SUM(svi.amount), 0) > 0 THEN (sv.sgst / COALESCE(SUM(svi.amount), 0)) * 100 ELSE 0 END, 2) AS sgst_percent,
+                    ROUND(CASE WHEN COALESCE(SUM(svi.amount), 0) > 0 THEN (sv.igst / COALESCE(SUM(svi.amount), 0)) * 100 ELSE 0 END, 2) AS igst_percent,
+                    GROUP_CONCAT(DISTINCT svi.hsn_number ORDER BY svi.hsn_number SEPARATOR ', ') AS hsn_sac,
+                    SUM(svi.quantity) AS total_qty,
+                    'Service Invoice' AS invoice_type,
+                    (
+                      COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = sv.invoice_no), 0)
+                      + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = sv.invoice_no), 0)
+                    ) AS paid_amount,
+                    (sv.grand_total
+                      - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = sv.invoice_no), 0)
+                      - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = sv.invoice_no), 0)
+                    ) AS balance_amount
+                FROM service_invoices sv
+                LEFT JOIN service_invoice_items svi ON sv.id = svi.invoice_id
+                LEFT JOIN newclient nc ON sv.customer_name = nc.customer_name
+                WHERE 1=1 ${svFilter}
+                GROUP BY sv.id, sv.invoice_no, sv.invoice_date, sv.customer_name, sv.cgst, sv.sgst, sv.igst, sv.grand_total
+
+                UNION ALL
+
+                SELECT
+                    d.invoice_no,
+                    d.invoice_date,
+                    d.customer_name,
+                    MAX(COALESCE(nc.gst_number, '')) AS gst_no,
+                    d.subtotal AS taxable_value,
+                    d.cgst AS cgst_amount,
+                    d.sgst AS sgst_amount,
+                    d.igst AS igst_amount,
+                    d.grandtotal AS total_invoice_value,
+                    ROUND(CASE WHEN d.subtotal > 0 THEN (d.cgst / d.subtotal) * 100 ELSE 0 END, 2) AS cgst_percent,
+                    ROUND(CASE WHEN d.subtotal > 0 THEN (d.sgst / d.subtotal) * 100 ELSE 0 END, 2) AS sgst_percent,
+                    ROUND(CASE WHEN d.subtotal > 0 THEN (d.igst / d.subtotal) * 100 ELSE 0 END, 2) AS igst_percent,
+                    GROUP_CONCAT(DISTINCT ii.hsn_number ORDER BY ii.hsn_number SEPARATOR ', ') AS hsn_sac,
+                    SUM(ii.quantity) AS total_qty,
+                    'Direct Invoice' AS invoice_type,
+                    (
+                      COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0)
+                      + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0)
+                    ) AS paid_amount,
+                    (d.grandtotal
+                      - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0)
+                      - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0)
+                    ) AS balance_amount
+                FROM directinvoice d
+                LEFT JOIN invoice_items ii ON d.id = ii.invoice_id
+                LEFT JOIN newclient nc ON d.customer_name = nc.customer_name
+                WHERE 1=1 ${diFilter}
+                GROUP BY d.id, d.invoice_no, d.invoice_date, d.customer_name, d.subtotal, d.cgst, d.sgst, d.igst, d.grandtotal
+            ) combined
+            ORDER BY invoice_date ASC, invoice_no ASC
         `;
 
-        let values = [];
-
-        if (fromDate && toDate) {
-            query += " AND s.invoice_date BETWEEN ? AND ?";
-            values.push(fromDate, toDate);
-        }
-
-        if (invoiceNo) {
-            query += " AND s.invoice_no = ?";
-            values.push(invoiceNo);
-        }
-
-        if (clientName) {
-            query += " AND s.customer_name = ?";
-            values.push(clientName);
-        }
-
-        query += " GROUP BY s.id, s.invoice_no, s.invoice_date, s.customer_name, s.subtotal, s.cgst, s.sgst, s.igst, s.grandtotal ORDER BY s.invoice_date DESC, s.invoice_no DESC";
-
+        const values = [...filterVals(), ...filterVals(), ...filterVals()];
         const [rows] = await db.promise().query(query, values);
+
+        const salesCount   = rows.filter(r => r.invoice_type === 'Sales Invoice').length;
+        const serviceCount = rows.filter(r => r.invoice_type === 'Service Invoice').length;
+        const directCount  = rows.filter(r => r.invoice_type === 'Direct Invoice').length;
+        console.log(`[Sales Report] Sales Invoice: ${salesCount} | Service Invoice: ${serviceCount} | Direct Invoice: ${directCount} | Total: ${rows.length}`);
+
         res.json(rows);
     } catch (error) {
         console.error("Report Error:", error);
         res.status(500).json({ message: "Report Failed" });
+    }
+});
+
+// Sales View Report — product-wise rows from all three invoice types
+router.get("/view-report", async (req, res) => {
+    try {
+        const { fromDate, toDate, customer_name, invoice_no, item_name } = req.query;
+
+        const buildFilter = (dateCol, nameCol, noCol, itemCol) => {
+            const conds = [];
+            if (fromDate && toDate) conds.push(`${dateCol} BETWEEN ? AND ?`);
+            if (customer_name) conds.push(`${nameCol} = ?`);
+            if (invoice_no) conds.push(`${noCol} = ?`);
+            if (item_name) conds.push(`${itemCol} LIKE ?`);
+            return conds.length ? " AND " + conds.join(" AND ") : "";
+        };
+
+        const filterVals = () => {
+            const v = [];
+            if (fromDate && toDate) v.push(fromDate, toDate);
+            if (customer_name) v.push(customer_name);
+            if (invoice_no) v.push(invoice_no);
+            if (item_name) v.push(`%${item_name}%`);
+            return v;
+        };
+
+        const siFilter = buildFilter("s.invoice_date", "s.customer_name", "s.invoice_no", "sii.item_name");
+        const svFilter = buildFilter("sv.invoice_date", "sv.customer_name", "sv.invoice_no", "svi.item_name");
+        const diFilter = buildFilter("d.invoice_date", "d.customer_name", "d.invoice_no", "ii.item_name");
+
+        const query = `
+            SELECT invoice_no, invoice_date, customer_name, item_name, serial_number, hsn_number, quantity, price, amount
+            FROM (
+                SELECT
+                    s.invoice_no, s.invoice_date, s.customer_name,
+                    sii.item_name, NULL AS serial_number,
+                    sii.hsn_number, sii.quantity, sii.price,
+                    (sii.quantity * sii.price) AS amount
+                FROM salesinvoice s
+                JOIN salesinvoice_items sii ON s.id = sii.invoice_id
+                WHERE 1=1 ${siFilter}
+
+                UNION ALL
+
+                SELECT
+                    sv.invoice_no, sv.invoice_date, sv.customer_name,
+                    svi.item_name, svi.serial_no AS serial_number,
+                    svi.hsn_number, svi.quantity, svi.price,
+                    (svi.quantity * svi.price) AS amount
+                FROM service_invoices sv
+                JOIN service_invoice_items svi ON sv.id = svi.invoice_id
+                WHERE 1=1 ${svFilter}
+
+                UNION ALL
+
+                SELECT
+                    d.invoice_no, d.invoice_date, d.customer_name,
+                    ii.item_name, NULL AS serial_number,
+                    ii.hsn_number, ii.quantity, ii.price,
+                    (ii.quantity * ii.price) AS amount
+                FROM directinvoice d
+                JOIN invoice_items ii ON d.id = ii.invoice_id
+                WHERE 1=1 ${diFilter}
+            ) combined
+            ORDER BY invoice_date ASC, invoice_no ASC
+        `;
+
+        const values = [...filterVals(), ...filterVals(), ...filterVals()];
+        const [rows] = await db.promise().query(query, values);
+        res.json(rows);
+    } catch (error) {
+        console.error("Sales View Report Error:", error);
+        res.status(500).json({ message: "Sales View Report Failed" });
     }
 });
 

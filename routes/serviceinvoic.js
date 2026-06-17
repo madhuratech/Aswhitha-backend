@@ -18,7 +18,7 @@ async function GenerateInvoiceNumber() {
     rows.forEach(row => {
         if (!row.invoice_no) return;
 
-        const match = row.invoice_no.match(/AT\/INV\/(\d+)/);
+        const match = row.invoice_no.match(/AT\/INV\/?(\d+)/);
 
         if (match) {
             maxNumber = Math.max(
@@ -67,14 +67,13 @@ router.get("/clients", async (req, res) => {
     const [rows] = await db.promise().query(
       `SELECT DISTINCT supplier_name AS customer_name
        FROM service_dc_entries sde
-       WHERE sde.status IN ('Service', 'Pending Invoice')
-       AND NOT EXISTS (
+       WHERE NOT EXISTS (
            SELECT 1 FROM service_invoices si WHERE si.dc_no = sde.inward_dc_no
        )
        AND EXISTS (
            SELECT 1 FROM service_dc_items sdi
            WHERE sdi.service_dc_id = sde.id
-           AND (sdi.remarks = 'Service' OR sdi.remarks = 'Services')
+           AND sdi.remarks IN ('Serviced', 'For Sale')
        )
        ORDER BY supplier_name ASC`
     );
@@ -104,19 +103,19 @@ router.get("/clients/search", async (req, res) => {
 
     const [rows] = await db.promise().query(
 
-      `SELECT DISTINCT supplier_name AS customer_name
+      `SELECT DISTINCT sde.supplier_name AS customer_name, nc.state, nc.gst_number
        FROM service_dc_entries sde
-       WHERE sde.status IN ('Service', 'Pending Invoice')
-       AND sde.supplier_name LIKE ?
+       LEFT JOIN newclient nc ON nc.customer_name = sde.supplier_name
+       WHERE sde.supplier_name LIKE ?
        AND NOT EXISTS (
            SELECT 1 FROM service_invoices si WHERE si.dc_no = sde.inward_dc_no
        )
        AND EXISTS (
            SELECT 1 FROM service_dc_items sdi
            WHERE sdi.service_dc_id = sde.id
-           AND (sdi.remarks = 'Service' OR sdi.remarks = 'Services')
+           AND sdi.remarks IN ('Serviced', 'For Sale')
        )
-       ORDER BY supplier_name ASC`,
+       ORDER BY sde.supplier_name ASC`,
 
       [`%${q}%`]
 
@@ -142,18 +141,46 @@ router.get("/clients/search", async (req, res) => {
 
 router.get("/service-dc/search", async (req, res) => {
   try {
-
     const q = req.query.q || "";
     const supplier = req.query.supplier || "";
+
+    // Debug Logging to identify why records are excluded
+    try {
+      const [allDcs] = await db.promise().query(`
+        SELECT sde.inward_dc_no, sde.supplier_name, sde.id,
+               (SELECT COUNT(*) FROM service_invoices si WHERE si.dc_no = sde.inward_dc_no) AS invoice_count,
+               (SELECT GROUP_CONCAT(CONCAT(sdi.item_name, ':', sdi.remarks)) FROM service_dc_items sdi WHERE sdi.service_dc_id = sde.id) AS items_remarks
+        FROM service_dc_entries sde
+        ORDER BY sde.id DESC LIMIT 10
+      `);
+      console.log("=== Service DC Dropdown Filtering Debug ===");
+      allDcs.forEach(dc => {
+        const isRemarksEligible = dc.items_remarks && (dc.items_remarks.includes("Serviced") || dc.items_remarks.includes("For Sale"));
+        const isInvoiced = dc.invoice_count > 0;
+        const filterResult = isRemarksEligible && !isInvoiced ? "Visible" : "Excluded";
+        console.log(`DC: ${dc.inward_dc_no} | Remarks/Items: [${dc.items_remarks || ""}] | Invoice Status: ${isInvoiced ? "Invoiced" : "Pending"} | Filter Result: ${filterResult}`);
+      });
+      console.log("==========================================");
+    } catch (logErr) {
+      console.error("Debug logging query failed:", logErr.message);
+    }
 
     let query = `
       SELECT
           sde.inward_dc_no,
           sde.party_dc_no,
           sde.supplier_name,
-          sde.dc_date
+          sde.dc_date,
+          (
+            SELECT GROUP_CONCAT(
+                CONCAT(sdi2.item_name, ' × ', CAST(sdi2.quantity AS CHAR), ' [', sdi2.remarks, ']')
+                SEPARATOR ' | ')
+            FROM service_dc_items sdi2
+            WHERE sdi2.service_dc_id = sde.id
+            AND sdi2.remarks IN ('Serviced', 'For Sale')
+          ) AS items_summary
       FROM service_dc_entries sde
-      WHERE sde.status IN ('Service', 'Pending Invoice')
+      WHERE 1=1
 
       -- Only non-invoiced DCs
       AND NOT EXISTS (
@@ -162,12 +189,12 @@ router.get("/service-dc/search", async (req, res) => {
           WHERE si.dc_no = sde.inward_dc_no
       )
 
-      -- Only DCs that have at least one Service item (excludes Re-Service, Return, Replacement, Scrap, etc.)
+      -- Only DCs with at least one invoice-eligible item (Serviced / For Sale)
       AND EXISTS (
           SELECT 1
           FROM service_dc_items sdi
           WHERE sdi.service_dc_id = sde.id
-          AND (sdi.remarks = 'Service' OR sdi.remarks = 'Services')
+          AND sdi.remarks IN ('Serviced', 'For Sale')
       )
 
       -- Search filter
@@ -227,7 +254,6 @@ router.get("/service-dc/by-admin/:adminDcNo", async (req, res) => {
       `SELECT *
        FROM service_dc_entries
        WHERE inward_dc_no = ?
-       AND status IN ('Service', 'Pending Invoice')
        LIMIT 1`,
       [adminDcNo]
     );
@@ -239,15 +265,32 @@ router.get("/service-dc/by-admin/:adminDcNo", async (req, res) => {
     const header = headerRows[0];
 
     const [items] = await db.promise().query(
-      `SELECT item_name, description, model_no, quantity, received_qty, serial_no, uom,
-              hsn AS hsn_number, remarks
+      `SELECT item_name, quantity, serial_no, uom,
+              hsn AS hsn_number, remarks,
+              party_dc_no, party_dc_date
        FROM service_dc_items
        WHERE service_dc_id = ?
-       AND (remarks = 'Service' OR remarks = 'Services')`,
+       AND remarks IN ('Serviced', 'For Sale')`,
       [header.id]
     );
 
-    res.json({ header, items });
+    const allOrderNos = items.map(item => item.party_dc_no).filter(Boolean);
+    const allOrderDates = items.map(item => {
+        if (!item.party_dc_date) return null;
+        return new Date(item.party_dc_date).toISOString().split("T")[0];
+    }).filter(Boolean);
+
+    const aggregated_order_no = allOrderNos.length
+        ? [...new Set(allOrderNos)].join(", ")
+        : (header.party_dc_no || "");
+
+    const aggregated_order_date = allOrderDates.length
+        ? [...new Set(allOrderDates)].join(", ")
+        : (header.dc_date
+            ? new Date(header.dc_date).toISOString().split("T")[0]
+            : "");
+
+    res.json({ header, items, aggregated_order_no, aggregated_order_date });
 
   } catch (error) {
 
@@ -273,7 +316,6 @@ router.get("/service-dc/:dcNo", async (req, res) => {
       `SELECT *
        FROM service_dc_entries
        WHERE party_dc_no = ?
-       AND status IN ('Service', 'Pending Invoice')
        AND NOT EXISTS (
            SELECT 1 FROM service_invoices si WHERE si.dc_no = service_dc_entries.inward_dc_no
        )
@@ -299,13 +341,12 @@ router.get("/service-dc/:dcNo", async (req, res) => {
       `SELECT
         item_name,
         quantity,
-        received_qty,
         uom,
         hsn AS hsn_number,
         remarks
        FROM service_dc_items
        WHERE service_dc_id = ?
-       AND (remarks = 'Service' OR remarks = 'Services')`,
+       AND remarks IN ('Serviced', 'For Sale')`,
 
       [header.id]
 
@@ -333,87 +374,91 @@ router.get("/service-dc/:dcNo", async (req, res) => {
 
 router.post("/create", async (req, res) => {
 
-  try {
+  const items = Array.isArray(req.body.items) ? req.body.items : [];
+
+  let attempts = 0;
+  const MAX_ATTEMPTS = 3;
+
+  while (attempts < MAX_ATTEMPTS) {
+    attempts++;
     const s = sanitizeBody(req.body);
-    const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    // Prevent duplicate invoice for the same DC
-    if (s.dc_no) {
-      const [existing] = await db.promise().query(
-        `SELECT id FROM service_invoices WHERE dc_no = ? LIMIT 1`,
-        [s.dc_no]
-      );
-      if (existing.length) {
-        return res.status(409).json({ message: "Invoice already exists for this Service DC" });
+    try {
+      // Prevent duplicate invoice for the same DC
+      if (s.dc_no) {
+        const [existing] = await db.promise().query(
+          `SELECT id FROM service_invoices WHERE dc_no = ? LIMIT 1`,
+          [s.dc_no]
+        );
+        if (existing.length) {
+          return res.status(409).json({ message: "Invoice already exists for this Service DC" });
+        }
       }
-    }
 
-    const [result] = await db.promise().query(
-      `INSERT INTO service_invoices
-      (customer_name, invoice_no, invoice_date, client_dc_no, client_dc_date, dc_no, dc_date,
-       order_no, order_date, payment_terms, dispatch_through, discount, cgst,
-       sgst, igst, transport, round_off, grand_total)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        s.customer_name,
-        s.invoice_no,
-        emptyToNull(s.invoice_date),
-        emptyToNull(s.client_dc_no),
-        emptyToNull(s.client_dc_date),
-        emptyToNull(s.dc_no),
-        emptyToNull(s.dc_date),
-        emptyToNull(s.order_no),
-        emptyToNull(s.order_date),
-        emptyToNull(s.payment_terms),
-        emptyToNull(s.dispatch_through),
-        toNum(s.discount),
-        toNum(s.cgst),
-        toNum(s.sgst),
-        toNum(s.igst),
-        toNum(s.transport),
-        toNum(s.round_off),
-        toNum(s.grand_total)
-      ]
-    );
-
-    const invoiceId = result.insertId;
-
-    if (s.dc_no) {
-    await db.promise().query(
-        `UPDATE service_dc_entries
-         SET status = 'Completed'
-         WHERE inward_dc_no = ?`,
-        [s.dc_no]
-    );
-}
-
-    for (const item of items) {
-      await db.promise().query(
-        `INSERT INTO service_invoice_items
-        (invoice_id, item_name, serial_no, description, model_no, quantity, price, discount, amount, uom, hsn_number)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      const [result] = await db.promise().query(
+        `INSERT INTO service_invoices
+        (customer_name, invoice_no, invoice_date, order_no, order_date, dc_no, dc_date,
+         dispatch_through, discount, cgst,
+         sgst, igst, transport, round_off, grand_total)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          invoiceId,
-          emptyToNull(item.item_name),
-          emptyToNull(item.serial_no),
-          emptyToNull(item.description),
-          emptyToNull(item.model_no),
-          toNum(item.quantity),
-          toNum(item.price),
-          toNum(item.discount),
-          toNum(item.amount),
-          emptyToNull(item.uom),
-          emptyToNull(item.hsn_number)
+          s.customer_name,
+          s.invoice_no,
+          emptyToNull(s.invoice_date),
+          emptyToNull(s.order_no),
+          emptyToNull(s.order_date),
+          emptyToNull(s.dc_no),
+          emptyToNull(s.dc_date),
+          emptyToNull(s.dispatch_through),
+          toNum(s.discount),
+          toNum(s.cgst),
+          toNum(s.sgst),
+          toNum(s.igst),
+          toNum(s.transport),
+          toNum(s.round_off),
+          toNum(s.grand_total)
         ]
       );
+
+      const invoiceId = result.insertId;
+
+      for (const item of items) {
+        await db.promise().query(
+          `INSERT INTO service_invoice_items
+          (invoice_id, item_name, serial_no, model_no, quantity, price, discount, amount, uom, hsn_number, order_no, order_date, dc_no, dc_date)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            invoiceId,
+            emptyToNull(item.item_name),
+            emptyToNull(item.serial_no),
+            emptyToNull(item.model_no),
+            toNum(item.quantity),
+            toNum(item.price),
+            toNum(item.discount),
+            toNum(item.amount),
+            emptyToNull(item.uom),
+            emptyToNull(item.hsn_number),
+            emptyToNull(item.order_no),
+            emptyToNull(item.order_date),
+            emptyToNull(item.dc_no),
+            emptyToNull(item.dc_date)
+          ]
+        );
+      }
+
+      return res.json({ message: "Invoice Saved Successfully", invoice_no: s.invoice_no });
+
+    } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY' && attempts < MAX_ATTEMPTS) {
+        const newNo = await GenerateInvoiceNumber();
+        req.body.invoice_no = newNo;
+        continue;
+      }
+      console.log(error);
+      return res.status(500).json({ message: "Save Failed" });
     }
-
-    res.json({ message: "Invoice Saved Successfully" });
-
-  } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Save Failed" });
   }
+  res.status(500).json({ message: "Failed to create invoice after multiple attempts" });
 });
 
 
@@ -529,15 +574,14 @@ router.put("/update/:invoice_no", async (req, res) => {
 
         await db.promise().query(
             `UPDATE service_invoices SET
-                customer_name=?, invoice_date=?, client_dc_no=?, client_dc_date=?, dc_no=?, dc_date=?,
-                order_no=?, order_date=?, payment_terms=?, dispatch_through=?,
+                customer_name=?, invoice_date=?, order_no=?, order_date=?, dc_no=?, dc_date=?,
+                  dispatch_through=?,
                 discount=?, cgst=?, sgst=?, igst=?, transport=?, round_off=?, grand_total=?
              WHERE invoice_no=?`,
             [
-                s.customer_name, emptyToNull(s.invoice_date), emptyToNull(s.client_dc_no),
-                emptyToNull(s.client_dc_date), emptyToNull(s.dc_no), emptyToNull(s.dc_date),
-                emptyToNull(s.order_no), emptyToNull(s.order_date),
-                emptyToNull(s.payment_terms), emptyToNull(s.dispatch_through),
+                s.customer_name, emptyToNull(s.invoice_date), emptyToNull(s.order_no),
+                emptyToNull(s.order_date), emptyToNull(s.dc_no), emptyToNull(s.dc_date),
+                 emptyToNull(s.dispatch_through),
                 toNum(s.discount), toNum(s.cgst), toNum(s.sgst), toNum(s.igst),
                 toNum(s.transport), toNum(s.round_off), toNum(s.grand_total), invoice_no
             ]
@@ -547,9 +591,24 @@ router.put("/update/:invoice_no", async (req, res) => {
 
         for (const item of items) {
             await db.promise().query(
-                `INSERT INTO service_invoice_items (invoice_id, item_name, serial_no, description, model_no, quantity, price, discount, amount, uom, hsn_number)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [invoiceId, emptyToNull(item.item_name), emptyToNull(item.serial_no), emptyToNull(item.description), emptyToNull(item.model_no), toNum(item.quantity), toNum(item.price), toNum(item.discount), toNum(item.amount), emptyToNull(item.uom), emptyToNull(item.hsn_number)]
+                `INSERT INTO service_invoice_items (invoice_id, item_name, serial_no, model_no, quantity, price, discount, amount, uom, hsn_number, order_no, order_date, dc_no, dc_date)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    invoiceId,
+                    emptyToNull(item.item_name),
+                    emptyToNull(item.serial_no),
+                    emptyToNull(item.model_no),
+                    toNum(item.quantity),
+                    toNum(item.price),
+                    toNum(item.discount),
+                    toNum(item.amount),
+                    emptyToNull(item.uom),
+                    emptyToNull(item.hsn_number),
+                    emptyToNull(item.order_no),
+                    emptyToNull(item.order_date),
+                    emptyToNull(item.dc_no),
+                    emptyToNull(item.dc_date)
+                ]
             );
         }
 

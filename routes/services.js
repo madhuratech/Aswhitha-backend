@@ -1,16 +1,14 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { emptyToNull, sanitizeBody } = require("../helpers/sanitize");
 
 router.post("/new", (req, res) => {
 console.log("REQ BODY:", req.body);
-  const {
-    service_name,
-    hsn_number,
-  } = req.body;
-    
-    if (!service_name || !hsn_number ) {
-    return res.status(400).json({ message: "Required fields missing" });
+  const s = sanitizeBody(req.body);
+
+  if (!s.service_name) {
+    return res.status(400).json({ message: "Service name is required" });
   }
   const sql = `
     INSERT INTO servicesdata
@@ -19,7 +17,7 @@ console.log("REQ BODY:", req.body);
   `;
 
     db.query(
-    sql,[service_name,hsn_number || 853690],
+    sql,[s.service_name, emptyToNull(s.hsn_number)],
      (err, result) => {
       if (err) {
         console.error("DB ERROR:", err);
@@ -47,10 +45,10 @@ db.query(sql, (err, results) => {
 // Update PCB model
 router.put("/update/:id", (req, res) => {
   const { id } = req.params;
-  const { service_name,hsn_number } = req.body;
+  const s = sanitizeBody(req.body);
 
-  if (!service_name || !hsn_number) {
-    return res.status(400).json({ message: "Required fields missing" });
+  if (!s.service_name) {
+    return res.status(400).json({ message: "Service name is required" });
   }
 
   const sql = `
@@ -59,7 +57,7 @@ router.put("/update/:id", (req, res) => {
     WHERE id = ?
   `;
 
-  db.query(sql, [service_name, hsn_number, id], (err) => {
+  db.query(sql, [s.service_name, emptyToNull(s.hsn_number), id], (err) => {
     if (err) {
       console.error("DB ERROR:", err);
       return res.status(500).json({ message: "Update failed" });

@@ -164,8 +164,8 @@ router.get("/next-sl", async (req, res) => {
 router.get("/IE/search", async (req, res) => {
   const { q, supplier } = req.query;
   const searchTerm = `%${q || ""}%`;
-  let query = "SELECT dc_number FROM inward_entry WHERE dc_number LIKE ?";
-  const params = [searchTerm];
+  let query = "SELECT sl_no, dc_number FROM inward_entry WHERE sl_no LIKE ? OR dc_number LIKE ?";
+  const params = [searchTerm, searchTerm];
   if (supplier) {
     query += " AND supplier_name = ?";
     params.push(supplier);
@@ -187,7 +187,7 @@ router.get("/edit/:dc_number", async (req, res) => {
     const { dc_number } = req.params;
 
     const [rows] = await db.promise().query(
-      "SELECT * FROM inward_entry WHERE dc_number = ?",
+      "SELECT * FROM inward_entry WHERE sl_no = ?",
       [dc_number]
     );
 

@@ -13,6 +13,46 @@ db.promise().query(
   "ALTER TABLE sales_dc_items ADD COLUMN remarks VARCHAR(100) DEFAULT NULL"
 ).catch(() => {});
 
+// Add price column to service_dc_items if not already present
+db.promise().query(
+  "ALTER TABLE service_dc_items ADD COLUMN price DECIMAL(10,2) DEFAULT 0.00"
+).catch(() => {});
+
+db.promise().query(
+  "ALTER TABLE salesinvoice MODIFY COLUMN dc_date VARCHAR(255) NULL"
+).catch(() => {});
+db.promise().query(
+  "ALTER TABLE service_invoices MODIFY COLUMN dc_date VARCHAR(255) NULL"
+).catch(() => {});
+db.promise().query(
+  "ALTER TABLE directinvoice MODIFY COLUMN dc_date VARCHAR(255) NULL"
+).catch(() => {});
+
+// Add dc_no and dc_date columns to salesinvoice_items and service_invoice_items
+db.promise().query(
+  "ALTER TABLE salesinvoice_items ADD COLUMN dc_no VARCHAR(100) DEFAULT ''"
+).catch(() => {});
+db.promise().query(
+  "ALTER TABLE salesinvoice_items ADD COLUMN dc_date VARCHAR(100) DEFAULT ''"
+).catch(() => {});
+db.promise().query(
+  "ALTER TABLE service_invoice_items ADD COLUMN dc_no VARCHAR(100) DEFAULT ''"
+).catch(() => {});
+db.promise().query(
+  "ALTER TABLE service_invoice_items ADD COLUMN dc_date VARCHAR(100) DEFAULT ''"
+).catch(() => {});
+
+// Legacy data migration for AT0916
+db.promise().query(
+  "UPDATE salesinvoice_items SET dc_no = '1189', dc_date = '2026-06-15' WHERE invoice_id = 12 AND order_no = 'GG 006'"
+).catch(() => {});
+db.promise().query(
+  "UPDATE salesinvoice_items SET dc_no = '1190', dc_date = '2026-06-15' WHERE invoice_id = 12 AND order_no = 'G 007'"
+).catch(() => {});
+db.promise().query(
+  "UPDATE salesinvoice SET dc_no = '1189, 1190' WHERE id = 12"
+).catch(() => {});
+
 const app = express();
 
 app.use(cors());
@@ -46,6 +86,10 @@ app.use("/api/pcb-stock", require("./routes/pcbstock"));
 app.use("/api/standby-pcb", require("./routes/standbypcb"));
 app.use("/api/scrappcb", require("./routes/scrappcb"));
 app.use("/api/spareusage", require("./routes/spareusage"));
+app.use("/api/jobdcentry", require("./routes/jobDcEntry"));
+app.use("/api/jobreturndc", require("./routes/jobReturnDc"));
+app.use("/api/standbydcentry", require("./routes/standbyDcEntry"));
+app.use("/api/standbyreturndc", require("./routes/standbyReturnDc"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

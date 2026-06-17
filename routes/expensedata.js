@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
+const { emptyToNull } = require("../helpers/sanitize");
 
 
 router.post("/new", (req, res) => {
@@ -17,13 +18,8 @@ router.post("/new", (req, res) => {
 
   for (let exp of expenses) {
     
-    if (
-      !exp.expense_date ||
-      !exp.category ||
-      !exp.amount ||
-      !exp.expense_description
-    ) {
-      return res.status(400).json({ message: "required fields missing" });
+    if (!exp.expense_date || !exp.category || !exp.amount) {
+      return res.status(400).json({ message: "Date, category, and amount are required" });
     }
 
     const amount = parseFloat(exp.amount);
@@ -36,7 +32,7 @@ router.post("/new", (req, res) => {
       exp.expense_date,
       exp.category,
       amount,
-      exp.expense_description
+      emptyToNull(exp.expense_description)
     ]);
   }
 

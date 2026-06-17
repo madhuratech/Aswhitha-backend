@@ -2,19 +2,12 @@ const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
+const { generateNextDcNo } = require("../helpers/dcNumber");
 
-async function DCGenerate() {
-    const [rows] = await db.promise().query(
-        "SELECT MAX(id) AS lastId FROM sales_dc_entries"
-    );
-    const nextId = (rows[0].lastId || 0) + 1;
-    return `AT/SDC-${nextId.toString().padStart(3, "0")}`;
-}
-
-// Get next Admin DC No
+// Get next Admin DC No — common sequence shared with Service DC
 router.get("/next-dc-no", async (req, res) => {
     try {
-        const dc_no = await DCGenerate();
+        const dc_no = await generateNextDcNo();
         res.json({ dc_no });
     } catch (error) {
         console.error("Error generating DC No:", error);
@@ -70,45 +63,47 @@ router.post("/new", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!s.customer_name || !s.dc_no || !s.payment_terms || !items.length) {
-        return res.status(400).json({ message: "Customer, Admin DC No, Client DC No and at least one item are required" });
+    if (!s.customer_name || !s.order_no || !items.length) {
+        return res.status(400).json({ message: "Customer, Client DC No and at least one item are required" });
     }
 
     const conn = await db.promise().getConnection();
     try {
         await conn.beginTransaction();
 
+        // Regenerate the DC number at save time from the shared sequence so it
+        // is unique even if the form-preview number went stale meanwhile
+        s.dc_no = await generateNextDcNo(conn);
+
         const [result] = await conn.query(
             `INSERT INTO sales_dc_entries
-             (customer_name, dc_no, dc_date, order_no, order_date, payment_terms, Client_dc_date, despatch_through, status, ordertype)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (customer_name, dc_no, dc_date, order_no, order_date, despatch_through, ordertype)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [
                 s.customer_name,
                 s.dc_no,
                 emptyToNull(s.dc_date),
                 emptyToNull(s.order_no),
                 emptyToNull(s.order_date),
-                emptyToNull(s.payment_terms),
-                emptyToNull(s.Client_dc_date),
                 emptyToNull(s.despatch_through),
-                s.status,
                 emptyToNull(s.ordertype)
             ]
         );
 
         const dcId = result.insertId;
-        const itemSql = `INSERT INTO sales_dc_items (dc_id, item_name, quantity, price, sl_no, hsn, uom, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+        const itemSql = `INSERT INTO sales_dc_items (dc_id, item_name, quantity, sl_no, hsn, uom, remarks, order_no, order_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
         for (const item of items) {
             await conn.query(itemSql, [
                 dcId,
                 emptyToNull(item.item_name),
                 toNum(item.quantity),
-                toNum(item.price),
                 emptyToNull(item.sl_no),
                 emptyToNull(item.hsn),
                 emptyToNull(item.uom),
-                emptyToNull(item.remarks)
+                emptyToNull(item.remarks),
+                emptyToNull(item.order_no) || emptyToNull(s.order_no),
+                emptyToNull(item.order_date) || emptyToNull(s.order_date)
             ]);
         }
 
@@ -150,7 +145,7 @@ router.put("/update/:dc_no", async (req, res) => {
         await conn.query(
             `UPDATE sales_dc_entries
              SET customer_name=?, dc_no=?, dc_date=?, order_no=?, order_date=?,
-                 payment_terms=?, Client_dc_date=?, despatch_through=?, status=?, ordertype=?
+              despatch_through=?, ordertype=?
              WHERE id=?`,
             [
                 s.customer_name,
@@ -158,10 +153,7 @@ router.put("/update/:dc_no", async (req, res) => {
                 emptyToNull(s.dc_date),
                 emptyToNull(s.order_no),
                 emptyToNull(s.order_date),
-                emptyToNull(s.payment_terms),
-                emptyToNull(s.Client_dc_date),
                 emptyToNull(s.despatch_through),
-                s.status,
                 emptyToNull(s.ordertype),
                 dcId
             ]
@@ -171,8 +163,10 @@ router.put("/update/:dc_no", async (req, res) => {
 
         for (const item of items) {
             await conn.query(
-                "INSERT INTO sales_dc_items (dc_id, item_name, quantity, price, sl_no, hsn, uom, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [dcId, emptyToNull(item.item_name), toNum(item.quantity), toNum(item.price), emptyToNull(item.sl_no), emptyToNull(item.hsn), emptyToNull(item.uom), emptyToNull(item.remarks)]
+                "INSERT INTO sales_dc_items (dc_id, item_name, quantity, sl_no, hsn, uom, remarks, order_no, order_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [dcId, emptyToNull(item.item_name), toNum(item.quantity), emptyToNull(item.sl_no), emptyToNull(item.hsn), emptyToNull(item.uom), emptyToNull(item.remarks),
+                 emptyToNull(item.order_no) || emptyToNull(s.order_no),
+                 emptyToNull(item.order_date) || emptyToNull(s.order_date)]
             );
         }
 
@@ -233,21 +227,63 @@ router.get("/edit/:dc_no", async (req, res) => {
 router.get("/full/:dc_no", async (req, res) => {
     try {
         const dcNo = decodeURIComponent(req.params.dc_no);
+
         const [dcRows] = await db.promise().query(
             "SELECT * FROM sales_dc_entries WHERE dc_no = ?",
             [dcNo]
         );
-        if (!dcRows.length) return res.status(404).json({ message: "Sales DC Not Found" });
+
+        if (!dcRows.length) {
+            return res.status(404).json({ message: "Sales DC Not Found" });
+        }
+
         const dcEntry = dcRows[0];
+
         const [itemRows] = await db.promise().query(
             "SELECT * FROM sales_dc_items WHERE dc_id = ?",
             [dcEntry.id]
         );
+
         const [clientRows] = await db.promise().query(
             "SELECT * FROM newclient WHERE customer_name = ?",
             [dcEntry.customer_name]
         );
-        res.json({ ...dcEntry, items: itemRows, client: clientRows[0] || {} });
+
+      const allDcNos = itemRows
+  .map(item => item.order_no)
+  .filter(Boolean);
+
+const allDcDates = itemRows
+  .map(item => {
+    if (!item.order_date) return null;
+    return new Date(item.order_date)
+      .toISOString()
+      .split("T")[0];
+  })
+  .filter(Boolean);
+
+      res.json({
+  ...dcEntry,
+  items: itemRows,
+  client: clientRows[0] || {},
+
+  aggregated_order_no:
+    allDcNos.length
+      ? allDcNos.join(", ")
+      : (dcEntry.order_no || ""),
+
+  aggregated_order_date:
+    allDcDates.length
+      ? allDcDates.join(", ")
+      : (
+          dcEntry.order_date
+            ? new Date(dcEntry.order_date)
+                .toISOString()
+                .split("T")[0]
+            : ""
+        )
+});
+
     } catch (error) {
         console.error("Error fetching full Sales DC:", error);
         res.status(500).json({ message: "Internal Server Error" });
@@ -274,8 +310,8 @@ router.get("/report/filters", async (req, res) => {
     try {
         const { fromDate, toDate, dcNo, clientName } = req.query;
         let query = `
-            SELECT s.dc_no, s.dc_date, s.customer_name, s.status, s.ordertype,
-                   si.item_name, si.quantity, si.price
+            SELECT s.dc_no, s.dc_date, s.customer_name, s.ordertype,
+                   si.item_name, si.quantity, si.remarks
             FROM sales_dc_entries s
             LEFT JOIN sales_dc_items si ON s.id = si.dc_id
             WHERE 1=1
@@ -298,8 +334,8 @@ router.get("/report/excel", async (req, res) => {
     try {
         const { fromDate, toDate, dcNo, clientName } = req.query;
         let query = `
-            SELECT s.dc_no, s.dc_date, s.customer_name, s.status, s.ordertype,
-                   si.item_name, si.quantity, si.price
+            SELECT s.dc_no, s.dc_date, s.customer_name, s.ordertype,
+                   si.item_name, si.quantity, si.remarks
             FROM sales_dc_entries s
             LEFT JOIN sales_dc_items si ON s.id = si.dc_id
             WHERE 1=1
@@ -319,11 +355,10 @@ router.get("/report/excel", async (req, res) => {
             { header: "DC No", key: "dc_no", width: 20 },
             { header: "Date", key: "dc_date", width: 15 },
             { header: "Client Name", key: "customer_name", width: 25 },
-            { header: "Status", key: "status", width: 15 },
             { header: "Order Type", key: "ordertype", width: 15 },
             { header: "Item Name", key: "item_name", width: 25 },
             { header: "Quantity", key: "quantity", width: 12 },
-            { header: "Price", key: "price", width: 12 }
+            { header: "Remarks", key: "remarks", width: 25 }
         ];
 
         rows.forEach((row, index) => worksheet.addRow({ sno: index + 1, ...row }));

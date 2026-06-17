@@ -2,24 +2,49 @@ const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
+const { generateNextDcNo } = require("../helpers/dcNumber");
+
+// Ensure item-level party DC columns exist
+(async () => {
+  try {
+    const [cols] = await db.promise().query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'service_dc_items'
+       AND COLUMN_NAME IN ('party_dc_no', 'party_dc_date')`
+    );
+    const existing = cols.map(c => c.COLUMN_NAME);
+    if (!existing.includes('party_dc_no')) {
+      await db.promise().query('ALTER TABLE service_dc_items ADD COLUMN party_dc_no VARCHAR(100)');
+    }
+    if (!existing.includes('party_dc_date')) {
+      await db.promise().query('ALTER TABLE service_dc_items ADD COLUMN party_dc_date DATE');
+    }
+  } catch (e) {
+    console.error('Migration error (service_dc_items):', e.message);
+  }
+})();
 
 
-// Auto-generate next Service DC number
+// Auto-generate next Service DC number — common sequence shared with Sales DC
 router.get("/next-dc-no", async (req, res) => {
   try {
-    const [rows] = await db.promise().query("SELECT MAX(id) AS lastId FROM service_dc_entries");
-    const nextId = (rows[0].lastId || 0) + 1;
-    res.json({ dc_no: `AT/SRDC-${nextId.toString().padStart(3, "0")}` });
+    const dc_no = await generateNextDcNo();
+    res.json({ dc_no });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Clients — only those who have inward entries
+// Clients — only those who still have an inward DC without a Service DC
 router.get("/clients", async (req, res) => {
   try {
     const [rows] = await db.promise().query(
-      "SELECT DISTINCT supplier_name AS customer_name FROM inward_entry ORDER BY supplier_name ASC"
+      `SELECT DISTINCT ie.supplier_name AS customer_name
+       FROM inward_entry ie
+       WHERE NOT EXISTS (
+           SELECT 1 FROM service_dc_entries sde WHERE sde.party_dc_no = ie.dc_number
+       )
+       ORDER BY ie.supplier_name ASC`
     );
     res.json(rows);
   } catch (err) {
@@ -28,12 +53,18 @@ router.get("/clients", async (req, res) => {
   }
 });
 
-// Client search — only inward entry customers
+// Client search — only customers with a pending (not yet converted) inward DC
 router.get("/clients/search", async (req, res) => {
   try {
     const { q } = req.query;
     const [rows] = await db.promise().query(
-      "SELECT DISTINCT supplier_name AS customer_name FROM inward_entry WHERE supplier_name LIKE ? ORDER BY supplier_name ASC LIMIT 20",
+      `SELECT DISTINCT ie.supplier_name AS customer_name
+       FROM inward_entry ie
+       WHERE ie.supplier_name LIKE ?
+       AND NOT EXISTS (
+           SELECT 1 FROM service_dc_entries sde WHERE sde.party_dc_no = ie.dc_number
+       )
+       ORDER BY ie.supplier_name ASC LIMIT 20`,
       [`%${q || ""}%`]
     );
     res.json(rows);
@@ -166,67 +197,59 @@ router.post("/createdc", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    // Determine workflow status: service-type DCs enter "Pending Invoice" state
-    const hasServiceItem = items.some(item => {
-      const r = (item.remarks || "").trim().toLowerCase();
-      return r === "service" || r === "services";
-    });
-    const incomingStatus = (s.status || "").trim();
-    const dcStatus = (incomingStatus === "Service" || hasServiceItem)
-      ? "Pending Invoice"
-      : (incomingStatus || null);
+    // Generate the DC number server-side at save time so it is always
+    // correct and unique, even if the form-preview number went stale
+    const dcNo = await generateNextDcNo();
 
     const [result] = await db.promise().query(
       `INSERT INTO service_dc_entries
-      (supplier_name, inward_dc_no, dc_date, party_dc_no, party_dc_date, payment_terms, despatch_through, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      (supplier_name, inward_dc_no, dc_date, party_dc_no, party_dc_date, payment_terms, despatch_through)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         s.supplier_name,
-        s.inward_dc_no,
+        dcNo,
         emptyToNull(s.dc_date),
         emptyToNull(s.party_dc_no),
         emptyToNull(s.party_dc_date),
         s.payment_terms || "",
-        emptyToNull(s.despatch_through),
-        dcStatus
+        emptyToNull(s.despatch_through)
       ]
     );
 
     const newDcEntryId = result.insertId;
 
-    // Mark the originating inward entry as "DC Created" so it no longer appears in DC creation screen
-    if (s.party_dc_no) {
-      try {
-        await db.promise().query(
-          `UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`,
-          [s.party_dc_no]
-        );
-      } catch (_) {
-        // Column may not exist yet — safe to ignore
-      }
-    }
-
     for (const item of items) {
       await db.promise().query(
         `INSERT INTO service_dc_items
-        (service_dc_id, item_name, description, model_no, quantity, serial_no, received_qty, uom, hsn, remarks)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newDcEntryId,
           emptyToNull(item.item_name),
-          emptyToNull(item.description),
-          emptyToNull(item.model_no),
           toNum(item.quantity, null),
           emptyToNull(item.serial_no),
-          toNum(item.received_qty),
           emptyToNull(item.uom),
           emptyToNull(item.hsn),
-          emptyToNull(item.remarks)
+          emptyToNull(item.remarks),
+          emptyToNull(item.party_dc_no),
+          emptyToNull(item.party_dc_date)
         ]
       );
     }
 
-    res.status(201).json({ message: "DC Entry created successfully" });
+    // Mark ALL unique party DC nos (from items) as "DC Created"
+    const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
+    if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
+    for (const dcNo of uniquePartyDcNos) {
+      try {
+        await db.promise().query(
+          `UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`,
+          [dcNo]
+        );
+      } catch (_) {}
+    }
+
+    res.status(201).json({ message: "DC Entry created successfully", dc_no: dcNo });
 
   } catch (error) {
     console.error("Error creating DC Entry:", error);
@@ -247,7 +270,7 @@ router.put("/updatedc/:id", async (req, res) => {
     await db.promise().query(
       `UPDATE service_dc_entries
        SET supplier_name=?, inward_dc_no=?, dc_date=?, party_dc_no=?,
-           party_dc_date=?, payment_terms=?, despatch_through=?, status=?
+           party_dc_date=?, payment_terms=?, despatch_through=?
        WHERE id=?`,
       [
         s.supplier_name,
@@ -257,7 +280,6 @@ router.put("/updatedc/:id", async (req, res) => {
         emptyToNull(s.party_dc_date),
         s.payment_terms || "",
         emptyToNull(s.despatch_through),
-        emptyToNull(s.status),
         dcId
       ]
     );
@@ -268,9 +290,18 @@ router.put("/updatedc/:id", async (req, res) => {
     // Insert updated items
     for (const item of items) {
       await db.promise().query(
-        "INSERT INTO service_dc_items (service_dc_id, item_name, description, model_no, quantity, serial_no, received_qty, uom, hsn, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [dcId, emptyToNull(item.item_name), emptyToNull(item.description), emptyToNull(item.model_no), toNum(item.quantity, null), emptyToNull(item.serial_no), toNum(item.received_qty), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks)]
+        "INSERT INTO service_dc_items (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [dcId, emptyToNull(item.item_name), toNum(item.quantity, null), emptyToNull(item.serial_no), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks), emptyToNull(item.party_dc_no), emptyToNull(item.party_dc_date)]
       );
+    }
+
+    // Mark all unique party DC nos from items as "DC Created"
+    const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
+    if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
+    for (const dcNo of uniquePartyDcNos) {
+      try {
+        await db.promise().query(`UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`, [dcNo]);
+      } catch (_) {}
     }
 
     res.json({ message: "DC Entry updated successfully" });
@@ -360,49 +391,6 @@ router.get("/editdc/:dc_number", async (req, res) => {
 });
 
 
-router.get("/editdc/:dc_number", async (req, res) => {
-
-  try {
-
-    const { dc_number } = req.params;
-
-    const [rows] = await db.promise().query(
-      "SELECT * FROM service_dc_entries WHERE inward_dc_no = ?",
-      [dc_number]
-    );
-
-    if (!rows.length) {
-
-      return res.status(404).json({
-        message: "DC not found"
-      });
-
-    }
-
-    const dcEntry = rows[0];
-
-    const [items] = await db.promise().query(
-      "SELECT * FROM service_dc_items WHERE service_dc_id = ?",
-      [dcEntry.id]
-    );
-
-    res.json({
-      header: dcEntry,
-      items
-    });
-
-  } catch (error) {
-
-    console.log(error);
-
-    res.status(500).json({
-      message: "Server Error"
-    });
-
-  }
-});
-
-
 
 // Get All Data
 router.get("/full/:dc_number", async (req, res) => {
@@ -439,13 +427,29 @@ router.get("/full/:dc_number", async (req, res) => {
         item_name,
         quantity,
         hsn,
-        remarks
+        serial_no AS sl_no,
+        uom,
+        remarks,
+        party_dc_no,
+        party_dc_date
        FROM service_dc_items
        WHERE service_dc_id = ?`,
 
       [dcEntry.id]
 
     );
+
+    // Aggregate unique party DC nos and dates from item level
+    const uniqueDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
+    const uniqueDcDates = [...new Set(
+      items.map(i => {
+        if (!i.party_dc_date) return null;
+        const d = new Date(i.party_dc_date);
+        return d.toISOString().split('T')[0];
+      }).filter(Boolean)
+    )];
+    const aggregatedDcNo = uniqueDcNos.length > 0 ? uniqueDcNos.join(',') : (dcEntry.party_dc_no || '');
+    const aggregatedDcDate = uniqueDcDates.length > 0 ? uniqueDcDates.join(',') : (dcEntry.party_dc_date ? new Date(dcEntry.party_dc_date).toISOString().split('T')[0] : '');
 
     // CLIENT
     const [clientRows] = await db.promise().query(
@@ -461,6 +465,8 @@ router.get("/full/:dc_number", async (req, res) => {
     res.json({
 
       ...dcEntry,
+      party_dc_no: aggregatedDcNo,
+      party_dc_date: aggregatedDcDate,
 
       items: items || [],
 
@@ -551,8 +557,7 @@ router.get("/all", async (req, res) => {
         party_dc_no,
         party_dc_date,
         payment_terms,
-        despatch_through,
-        status
+        despatch_through
       FROM service_dc_entries
       ORDER BY id DESC`
 
@@ -567,11 +572,8 @@ router.get("/all", async (req, res) => {
         `SELECT
           id,
           item_name,
-          description,
-          model_no,
           quantity,
           serial_no,
-          received_qty,
           uom,
           hsn,
           remarks

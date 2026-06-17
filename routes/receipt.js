@@ -50,12 +50,18 @@ router.get("/next-receipt-no", async (req, res) => {
   }
 });
 
-// Get Clients — only customers who have at least one invoice
+// Get Clients — customers who have at least one invoice across all invoice types
 router.get("/clients", async (req, res) => {
   try {
     const [rows] = await db.promise().query(
       `SELECT DISTINCT customer_name
-       FROM salesinvoice
+       FROM (
+         SELECT customer_name FROM salesinvoice
+         UNION
+         SELECT customer_name FROM service_invoices
+         UNION
+         SELECT customer_name FROM directinvoice
+       ) AS all_customers
        ORDER BY customer_name ASC`
     );
     res.json(rows);
@@ -64,17 +70,23 @@ router.get("/clients", async (req, res) => {
   }
 });
 
-// Search Clients — only customers who have at least one invoice
+// Search Clients — customers across all invoice types
 router.get("/clients/search", async (req, res) => {
   const { q } = req.query;
+  const like = `%${q || ""}%`;
   try {
     const [rows] = await db.promise().query(
       `SELECT DISTINCT customer_name
-       FROM salesinvoice
-       WHERE customer_name LIKE ?
+       FROM (
+         SELECT customer_name FROM salesinvoice WHERE customer_name LIKE ?
+         UNION
+         SELECT customer_name FROM service_invoices WHERE customer_name LIKE ?
+         UNION
+         SELECT customer_name FROM directinvoice WHERE customer_name LIKE ?
+       ) AS all_customers
        ORDER BY customer_name ASC
        LIMIT 20`,
-      [`%${q || ""}%`]
+      [like, like, like]
     );
     res.json(rows);
   } catch (error) {
@@ -82,16 +94,65 @@ router.get("/clients/search", async (req, res) => {
   }
 });
 
-// Get Customer Pending Bills (from sales invoices)
+// Get Customer Pending Bills — all invoice types, deducts receipt + billwise payments, only unpaid
 router.get("/customer-bills/:customerName", async (req, res) => {
   try {
     const customerName = decodeURIComponent(req.params.customerName);
     const [rows] = await db.promise().query(
-      `SELECT invoice_no AS bill_no, invoice_date AS bill_date, grandtotal  AS bill_amount
-       FROM salesinvoice
-       WHERE customer_name = ?
-       ORDER BY id ASC`,
-      [customerName]
+      `SELECT bill_no, bill_date, bill_amount, already_paid, pending_balance
+       FROM (
+         SELECT
+           si.invoice_no AS bill_no,
+           si.invoice_date AS bill_date,
+           si.grandtotal AS bill_amount,
+           (
+             COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = si.invoice_no), 0)
+             + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = si.invoice_no), 0)
+           ) AS already_paid,
+           (si.grandtotal
+             - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = si.invoice_no), 0)
+             - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = si.invoice_no), 0)
+           ) AS pending_balance
+         FROM salesinvoice si
+         WHERE si.customer_name = ?
+
+         UNION ALL
+
+         SELECT
+           sv.invoice_no AS bill_no,
+           sv.invoice_date AS bill_date,
+           sv.grand_total AS bill_amount,
+           (
+             COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = sv.invoice_no), 0)
+             + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = sv.invoice_no), 0)
+           ) AS already_paid,
+           (sv.grand_total
+             - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = sv.invoice_no), 0)
+             - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = sv.invoice_no), 0)
+           ) AS pending_balance
+         FROM service_invoices sv
+         WHERE sv.customer_name = ?
+
+         UNION ALL
+
+         SELECT
+           d.invoice_no AS bill_no,
+           d.invoice_date AS bill_date,
+           d.grandtotal AS bill_amount,
+           (
+             COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0)
+             + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0)
+           ) AS already_paid,
+           (d.grandtotal
+             - COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0)
+             - COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0)
+           ) AS pending_balance
+         FROM directinvoice d
+         WHERE d.customer_name = ?
+       ) combined
+       WHERE pending_balance > 0
+       ORDER BY bill_date ASC`,
+      [customerName, customerName, customerName]
     );
     res.json(rows);
   } catch (error) {
@@ -229,6 +290,21 @@ router.get("/report/customers", async (req, res) => {
   }
 });
 
+// Receipt Report — receipt numbers dropdown
+router.get("/report/receipt-nos", async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT r.receipt_no
+       FROM receipts r
+       WHERE EXISTS (SELECT 1 FROM receipt_items ri WHERE ri.receipt_id = r.id)
+       ORDER BY r.id DESC`
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Receipt Report — filtered data (bill-wise receipts only)
 router.get("/report/filters", async (req, res) => {
   try {
@@ -359,7 +435,15 @@ router.get("/ledger-customers", async (req, res) => {
   const { q } = req.query;
   try {
     const [rows] = await db.promise().query(
-      "SELECT DISTINCT customer_name FROM salesinvoice WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 200",
+      `SELECT DISTINCT customer_name FROM (
+         SELECT customer_name FROM salesinvoice
+         UNION
+         SELECT customer_name FROM service_invoices
+         UNION
+         SELECT customer_name FROM directinvoice
+       ) AS all_customers
+       WHERE customer_name LIKE ?
+       ORDER BY customer_name ASC LIMIT 200`,
       [`%${q || ""}%`]
     );
     res.json(rows);
@@ -372,6 +456,75 @@ router.get("/ledger-customers", async (req, res) => {
 router.get("/customer-ledger", async (req, res) => {
   try {
     const { customer_name, fromDate, toDate, type } = req.query;
+
+    // Outstanding: invoices that still have unpaid balance
+    if (type === "outstanding") {
+      const conditions = [];
+      const params = [];
+      if (customer_name) {
+        conditions.push("customer_name = ?");
+        params.push(customer_name);
+      }
+      const whereClause = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
+
+      const [outstanding] = await db.promise().query(
+        `SELECT
+          customer_name,
+          bill_no,
+          date,
+          bill_amount,
+          receipt_paid,
+          billwise_paid,
+          (receipt_paid + billwise_paid) AS paid_amount,
+          (bill_amount - receipt_paid - billwise_paid) AS balance
+        FROM (
+          SELECT
+            si.invoice_no AS bill_no,
+            si.invoice_date AS date,
+            si.grandtotal AS bill_amount,
+            si.customer_name,
+            COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = si.invoice_no), 0) AS receipt_paid,
+            COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = si.invoice_no), 0) AS billwise_paid
+          FROM salesinvoice si
+
+          UNION ALL
+
+          SELECT
+            sv.invoice_no AS bill_no,
+            sv.invoice_date AS date,
+            sv.grand_total AS bill_amount,
+            sv.customer_name,
+            COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = sv.invoice_no), 0) AS receipt_paid,
+            COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = sv.invoice_no), 0) AS billwise_paid
+          FROM service_invoices sv
+
+          UNION ALL
+
+          SELECT
+            d.invoice_no AS bill_no,
+            d.invoice_date AS date,
+            d.grandtotal AS bill_amount,
+            d.customer_name,
+            COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0) AS receipt_paid,
+            COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0) AS billwise_paid
+          FROM directinvoice d
+        ) AS inner_invoices
+        ${whereClause}
+        ORDER BY date ASC`,
+        params
+      );
+
+      return res.json({
+        customer_name: customer_name || "ALL",
+        type: "outstanding",
+        outstanding: outstanding.map(row => ({
+          ...row,
+          bill_amount: parseFloat(row.bill_amount),
+          paid_amount: parseFloat(row.paid_amount),
+          balance: parseFloat(parseFloat(row.balance).toFixed(2))
+        }))
+      });
+    }
 
     // Build invoice query — customer_name is optional (empty = all customers)
     const iConditions = [];
@@ -386,23 +539,54 @@ router.get("/customer-ledger", async (req, res) => {
     }
     const invoiceWhere = iConditions.length ? "WHERE " + iConditions.join(" AND ") : "";
 
-    // Join invoices with their payments so credit shows in the same row (no separate receipt rows)
     const [invoices] = await db.promise().query(
       `SELECT inv.invoice_no AS bill_no, inv.invoice_date AS date,
           inv.grandtotal AS debit,
-          IFNULL(SUM(ri.paid_amount), 0) AS credit,
-          IFNULL(GROUP_CONCAT(DISTINCT r.receipt_no ORDER BY r.receipt_date SEPARATOR ', '), '') AS receipt_no,
-          IFNULL(GROUP_CONCAT(DISTINCT r.receipt_date ORDER BY r.receipt_date SEPARATOR ', '), '') AS paid_date,
-          IFNULL(GROUP_CONCAT(DISTINCT NULLIF(TRIM(CONCAT_WS(' ', r.bank_name, r.remarks)),'') ORDER BY r.receipt_date SEPARATOR ', '), '') AS payment_mode,
-          IFNULL(GROUP_CONCAT(DISTINCT r.bank_name ORDER BY r.receipt_date SEPARATOR ', '), '') AS bank_name,
-          IFNULL(GROUP_CONCAT(DISTINCT r.reference_number ORDER BY r.receipt_date SEPARATOR ', '), '') AS reference_number,
+          0 AS credit,
+          '' AS receipt_no,
+          '' AS paid_date,
+          '' AS payment_mode,
+          '' AS bank_name,
+          '' AS reference_number,
           IFNULL(inv.payment_terms,'') AS notes, 'invoice' AS entry_type
-        FROM salesinvoice inv
-        LEFT JOIN receipt_items ri ON ri.bill_no = inv.invoice_no
-        LEFT JOIN receipts r ON r.id = ri.receipt_id
-        ${invoiceWhere}
-        GROUP BY inv.invoice_no, inv.invoice_date, inv.grandtotal, inv.payment_terms`,
+        FROM (
+          SELECT invoice_no, invoice_date, grandtotal, '' AS payment_terms, customer_name FROM salesinvoice
+          UNION ALL
+          SELECT invoice_no, invoice_date, grand_total AS grandtotal, '' AS payment_terms, customer_name FROM service_invoices
+          UNION ALL
+          SELECT invoice_no, invoice_date, grandtotal, payment_terms, customer_name FROM directinvoice
+        ) inv
+        ${invoiceWhere}`,
       invoiceParams
+    );
+
+    // Build receipt query
+    const rConditions = [];
+    const receiptParams = [];
+    if (customer_name) {
+      rConditions.push("r.customer_name = ?");
+      receiptParams.push(customer_name);
+    }
+    if (fromDate && toDate) {
+      rConditions.push("r.receipt_date BETWEEN ? AND ?");
+      receiptParams.push(fromDate, toDate);
+    }
+    const receiptWhere = rConditions.length ? "WHERE " + rConditions.join(" AND ") : "";
+
+    const [receipts] = await db.promise().query(
+      `SELECT ri.bill_no AS bill_no, r.receipt_date AS date,
+          0 AS debit,
+          ri.paid_amount AS credit,
+          r.receipt_no AS receipt_no,
+          r.receipt_date AS paid_date,
+          IFNULL(NULLIF(TRIM(CONCAT_WS(' ', r.bank_name, r.remarks)),''), r.payment_mode) AS payment_mode,
+          IFNULL(r.bank_name, '') AS bank_name,
+          IFNULL(r.reference_number, '') AS reference_number,
+          IFNULL(r.remarks, '') AS notes, 'receipt' AS entry_type
+        FROM receipt_items ri
+        INNER JOIN receipts r ON r.id = ri.receipt_id
+        ${receiptWhere}`,
+      receiptParams
     );
 
     // Build bill wise payments query
@@ -423,7 +607,7 @@ router.get("/customer-ledger", async (req, res) => {
       bpi.bill_no        AS bill_no,
       bpi.bill_date      AS bill_date,
       bp.entry_date      AS date,
-      bpi.bill_amount    AS debit,
+      0                  AS debit,
       bpi.paid_amount    AS credit,
       IFNULL(bp.receipt_no, '')          AS receipt_no,
       bp.entry_date      AS paid_date,
@@ -442,10 +626,19 @@ router.get("/customer-ledger", async (req, res) => {
       paymentParams
     );
 
-    // Sort by date ascending
-    const combined = [...invoices, ...payments].sort(
-      (a, b) => new Date(a.date) - new Date(b.date)
-    );
+    // Sort by date ascending. If dates match, debits (invoices) appear before credits.
+    const combined = [...invoices, ...receipts, ...payments].sort((a, b) => {
+      const dateA = new Date(a.date);
+      const dateB = new Date(b.date);
+      if (dateA - dateB !== 0) {
+        return dateA - dateB;
+      }
+      const isDebitA = Number(a.debit) > 0;
+      const isDebitB = Number(b.debit) > 0;
+      if (isDebitA && !isDebitB) return -1;
+      if (!isDebitA && isDebitB) return 1;
+      return (a.bill_no || '').localeCompare(b.bill_no || '') || (a.receipt_no || '').localeCompare(b.receipt_no || '');
+    });
 
     let balance = 0;
     const entries = combined.map((row, idx) => {
@@ -455,142 +648,6 @@ router.get("/customer-ledger", async (req, res) => {
 
     const totalDebit = entries.reduce((s, r) => s + Number(r.debit), 0);
     const totalCredit = entries.reduce((s, r) => s + Number(r.credit), 0);
-
-    // Outstanding: invoices that still have unpaid balance
-
-   if (type === "outstanding") {
-
-  // Receipt Payments
-  const receiptPaidWhere = customer_name ? "WHERE r.customer_name = ?" : "";
-  const receiptPaidParams = customer_name ? [customer_name] : [];
-
-  const [receiptPaidRows] = await db.promise().query(
-    `SELECT
-        ri.bill_no,
-        SUM(ri.paid_amount) AS paid
-     FROM receipt_items ri
-     INNER JOIN receipts r
-       ON ri.receipt_id = r.id
-     ${receiptPaidWhere}
-     GROUP BY ri.bill_no`,
-    receiptPaidParams
-  );
-
-  // Bill Wise Payments
-  const bwpWhere = customer_name ? "WHERE nc.customer_name = ?" : "";
-  const bwpParams = customer_name ? [customer_name] : [];
-
-  const [bwpPaidRows] = await db.promise().query(
-    `SELECT
-        bpi.bill_no,
-        SUM(bpi.paid_amount) AS paid
-     FROM billwise_payment_items bpi
-     INNER JOIN billwise_payments bp
-       ON bpi.payment_id = bp.id
-     INNER JOIN newclient nc
-       ON bp.supplier_id = nc.id
-     ${bwpWhere}
-     GROUP BY bpi.bill_no`,
-    bwpParams
-  );
-
-  // Normalize bill number: extract trailing numeric sequence, parse as int to drop leading zeros.
-  // AT/INV/005 → 5,  BILL-005 → 5,  BILL-2026-003 → 3,  AT/INV/003 → 3
-  const normBill = (s) => {
-    const nums = (s || '').match(/\d+/g);
-    if (!nums || nums.length === 0) return (s || '').toLowerCase().replace(/\s/g, '');
-    return String(parseInt(nums[nums.length - 1], 10));
-  };
-
-  // Receipt Map — exact + normalized
-  const receiptPaidMap = {};
-  const receiptPaidNormMap = {};
-  receiptPaidRows.forEach((row) => {
-    const amt = Number(row.paid || 0);
-    receiptPaidMap[row.bill_no] = amt;
-    receiptPaidNormMap[normBill(row.bill_no)] = amt;
-  });
-
-  // Bill Wise Map — exact + normalized
-  const bwpPaidMap = {};
-  const bwpPaidNormMap = {};
-  bwpPaidRows.forEach((row) => {
-    const amt = Number(row.paid || 0);
-    bwpPaidMap[row.bill_no] = amt;
-    bwpPaidNormMap[normBill(row.bill_no)] = amt;
-  });
-
-  console.log("Receipt Map:", receiptPaidMap);
-  console.log("BillWise Map:", bwpPaidMap);
-
-  // Sales Invoices
-  const invWhere = customer_name
-    ? "WHERE customer_name = ?"
-    : "";
-
-  const invParams = customer_name
-    ? [customer_name]
-    : [];
-
-  const [allInvoices] = await db.promise().query(
-    `SELECT
-        invoice_no AS bill_no,
-        invoice_date AS date,
-        grandtotal AS bill_amount
-     FROM salesinvoice
-     ${invWhere}`,
-    invParams
-  );
-
-  const matchedBwpNos = new Set();
-
-  const outstanding = allInvoices
-    .map((inv) => {
-      const normInv = normBill(inv.bill_no);
-
-      // Exact match first, then normalized fallback
-      const receipt_paid = inv.bill_no in receiptPaidMap
-        ? receiptPaidMap[inv.bill_no]
-        : (receiptPaidNormMap[normInv] || 0);
-
-      const bwp_paid = inv.bill_no in bwpPaidMap
-        ? bwpPaidMap[inv.bill_no]
-        : (bwpPaidNormMap[normInv] || 0);
-
-      if (bwp_paid > 0) matchedBwpNos.add(normInv);
-
-      console.log(`[Outstanding] invoice_no=${inv.bill_no} | receipt_paid=${receipt_paid} | bwp_paid=${bwp_paid}`);
-
-      const total_paid = receipt_paid + bwp_paid;
-      const balance = Number(inv.bill_amount) - total_paid;
-
-      return {
-        bill_no: inv.bill_no,
-        date: inv.date,
-        bill_amount: Number(inv.bill_amount),
-
-        receipt_paid: Number(receipt_paid.toFixed(2)),
-        bwp_paid: Number(bwp_paid.toFixed(2)),
-
-        paid_amount: Number(total_paid.toFixed(2)),
-        balance: Number(balance.toFixed(2))
-      };
-    })
-    .filter((row) => row.balance > 0);
-
-  // Log unmatched bill wise payment entries
-  Object.keys(bwpPaidMap).forEach((bno) => {
-    if (!matchedBwpNos.has(normBill(bno))) {
-      console.log(`[BillWise Unmatched] bill_no=${bno} | amount=${bwpPaidMap[bno]}`);
-    }
-  });
-
-  return res.json({
-    customer_name: customer_name || "ALL",
-    type: "outstanding",
-    outstanding
-  });
-}
 
     res.json({
       customer_name: customer_name || "ALL",
@@ -611,7 +668,7 @@ router.get("/customer-ledger", async (req, res) => {
 // Receipt Voucher Report — receipts WITH their bill items (for voucher display)
 router.get("/report/vouchers", async (req, res) => {
   try {
-    const { fromDate, toDate, customerName } = req.query;
+    const { fromDate, toDate, customerName, receiptNo } = req.query;
 
     let query = `
       SELECT
@@ -636,6 +693,23 @@ router.get("/report/vouchers", async (req, res) => {
     if (customerName) {
       query += " AND r.customer_name = ?";
       values.push(customerName);
+    }
+    if (receiptNo) {
+      query += " AND r.receipt_no = ?";
+      values.push(receiptNo);
+    }
+
+    const hasFilters = (fromDate && toDate) || customerName || receiptNo;
+    if (!hasFilters) {
+      const [latestRows] = await db.promise().query(
+        "SELECT id FROM receipts ORDER BY id DESC LIMIT 1"
+      );
+      if (latestRows.length) {
+        query += " AND r.id = ?";
+        values.push(latestRows[0].id);
+      } else {
+        query += " AND 1=0";
+      }
     }
 
     query += " ORDER BY r.receipt_date DESC, r.id DESC, ri.id ASC";
@@ -690,12 +764,21 @@ router.get("/:receipt_no", async (req, res) => {
   try {
     const receipt_no = decodeURIComponent(req.params.receipt_no);
     const [rows] = await db.promise().query(
-      "SELECT * FROM receipts WHERE receipt_no = ?", [receipt_no]
+      `SELECT r.*, nc.address, nc.gst_number, nc.phone
+       FROM receipts r
+       LEFT JOIN newclient nc ON nc.customer_name = r.customer_name
+       WHERE r.receipt_no = ?`, [receipt_no]
     );
     if (!rows.length) return res.status(404).json({ message: "Receipt not found" });
     const receipt = rows[0];
     const [items] = await db.promise().query(
-      "SELECT * FROM receipt_items WHERE receipt_id = ?", [receipt.id]
+      `SELECT ri.*,
+        (
+          COALESCE((SELECT SUM(ri2.paid_amount) FROM receipt_items ri2 WHERE ri2.bill_no = ri.bill_no AND ri2.receipt_id != ri.receipt_id), 0)
+          + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = ri.bill_no), 0)
+        ) AS already_paid
+       FROM receipt_items ri
+       WHERE ri.receipt_id = ?`, [receipt.id]
     );
     res.json({ header: receipt, items });
   } catch (error) {
