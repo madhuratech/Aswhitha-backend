@@ -231,6 +231,102 @@ db.promise().query(
   }
 })();
 
+// ── Performance Invoice Tables ────────────────────────────────────────────────
+(async () => {
+  try {
+    await db.promise().query(`
+      CREATE TABLE IF NOT EXISTS performance_invoice_header (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        customer_name VARCHAR(255),
+        invoice_no VARCHAR(100) UNIQUE,
+        invoice_date VARCHAR(255),
+        dc_no VARCHAR(500),
+        dc_date VARCHAR(500),
+        order_no VARCHAR(500),
+        order_date VARCHAR(500),
+        payment_terms VARCHAR(255),
+        dispatch_through VARCHAR(255),
+        discount DECIMAL(10,2) DEFAULT 0,
+        transport DECIMAL(10,2) DEFAULT 0,
+        subtotal DECIMAL(10,2) DEFAULT 0,
+        ordertype VARCHAR(50),
+        cgst DECIMAL(10,2) DEFAULT 0,
+        sgst DECIMAL(10,2) DEFAULT 0,
+        igst DECIMAL(10,2) DEFAULT 0,
+        round_off DECIMAL(10,2) DEFAULT 0,
+        grandtotal DECIMAL(10,2) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    await db.promise().query(`
+      CREATE TABLE IF NOT EXISTS performance_invoice_items (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id INT,
+        item_name VARCHAR(255),
+        serial_no VARCHAR(255),
+        quantity DECIMAL(10,2),
+        price DECIMAL(10,2),
+        uom VARCHAR(50),
+        hsn_number VARCHAR(50),
+        amount DECIMAL(10,2),
+        FOREIGN KEY (invoice_id) REFERENCES performance_invoice_header(id) ON DELETE CASCADE
+      )
+    `);
+    console.log("Performance Invoice tables ready");
+  } catch (e) {
+    console.error("Performance Invoice table migration error:", e.message);
+  }
+})();
+
+// ── Performance Invoice 2 Tables ─────────────────────────────────────────────
+(async () => {
+  try {
+    await db.promise().query(`
+      CREATE TABLE IF NOT EXISTS performance_invoice2_header (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        customer_name VARCHAR(255),
+        invoice_no VARCHAR(100) UNIQUE,
+        invoice_date VARCHAR(255),
+        dc_no VARCHAR(500),
+        dc_date VARCHAR(500),
+        order_no VARCHAR(500),
+        order_date VARCHAR(500),
+        payment_terms VARCHAR(255),
+        dispatch_through VARCHAR(255),
+        discount DECIMAL(10,2) DEFAULT 0,
+        transport DECIMAL(10,2) DEFAULT 0,
+        subtotal DECIMAL(10,2) DEFAULT 0,
+        ordertype VARCHAR(50),
+        cgst DECIMAL(10,2) DEFAULT 0,
+        sgst DECIMAL(10,2) DEFAULT 0,
+        igst DECIMAL(10,2) DEFAULT 0,
+        round_off DECIMAL(10,2) DEFAULT 0,
+        grandtotal DECIMAL(10,2) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    await db.promise().query(`
+      CREATE TABLE IF NOT EXISTS performance_invoice2_items (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id INT,
+        item_name VARCHAR(255),
+        serial_no VARCHAR(255),
+        quantity DECIMAL(10,2),
+        price DECIMAL(10,2),
+        uom VARCHAR(50),
+        hsn_number VARCHAR(50),
+        amount DECIMAL(10,2),
+        FOREIGN KEY (invoice_id) REFERENCES performance_invoice2_header(id) ON DELETE CASCADE
+      )
+    `);
+    console.log("Performance Invoice 2 tables ready");
+  } catch (e) {
+    console.error("Performance Invoice 2 table migration error:", e.message);
+  }
+})();
+
 // ── DC Running Number Counter ──────────────────────────────────────────────────
 (async () => {
   try {
@@ -284,6 +380,7 @@ app.use("/api/taxpurchases", require("./routes/taxpurchase"));
 app.use("/api/billpayment", require("./routes/billwisepayment"));
 app.use("/api/quotations", require("./routes/quotation"));
 app.use("/api/directinvoices", require("./routes/directinvoice"));
+app.use("/api/performanceinvoices2", require("./routes/performanceinvoice2"));
 app.use("/api/salesinvoices", require("./routes/salesinvoice"));
 app.use("/api/salesdc", require("./routes/salesdc"));
 app.use("/api/Inwardentries", require("./routes/inwardentry"));
