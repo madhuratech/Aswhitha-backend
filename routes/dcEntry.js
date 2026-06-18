@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
-const { generateNextDcNo } = require("../helpers/dcNumber");
+const { getCurrentDcNumber, getAndIncrementDcNumber } = require("../helpers/dcNumber");
 
 // Ensure item-level party DC columns exist
 (async () => {
@@ -17,7 +17,7 @@ const { generateNextDcNo } = require("../helpers/dcNumber");
       await db.promise().query('ALTER TABLE service_dc_items ADD COLUMN party_dc_no VARCHAR(100)');
     }
     if (!existing.includes('party_dc_date')) {
-      await db.promise().query('ALTER TABLE service_dc_items ADD COLUMN party_dc_date DATE');
+      await db.promise().query('ALTER TABLE service_dc_items ADD COLUMN party_dc_date VARCHAR(500)');
     }
   } catch (e) {
     console.error('Migration error (service_dc_items):', e.message);
@@ -25,24 +25,28 @@ const { generateNextDcNo } = require("../helpers/dcNumber");
 })();
 
 
-// Auto-generate next Service DC number — common sequence shared with Sales DC
+// Get next DC No from shared counter
 router.get("/next-dc-no", async (req, res) => {
   try {
-    const dc_no = await generateNextDcNo();
+    const dc_no = await getCurrentDcNumber();
     res.json({ dc_no });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Clients — only those who still have an inward DC without a Service DC
+// Clients — only those who still have a pending (not completed) inward DC
 router.get("/clients", async (req, res) => {
   try {
     const [rows] = await db.promise().query(
       `SELECT DISTINCT ie.supplier_name AS customer_name
        FROM inward_entry ie
-       WHERE NOT EXISTS (
-           SELECT 1 FROM service_dc_entries sde WHERE sde.party_dc_no = ie.dc_number
+       WHERE ie.dc_number IS NOT NULL AND ie.dc_number != ''
+       AND NOT EXISTS (
+           SELECT 1 FROM order_status os
+           WHERE os.order_no = ie.dc_number
+             AND os.dc_type = 'Service'
+             AND os.status = 'Completed'
        )
        ORDER BY ie.supplier_name ASC`
     );
@@ -53,7 +57,7 @@ router.get("/clients", async (req, res) => {
   }
 });
 
-// Client search — only customers with a pending (not yet converted) inward DC
+// Client search — only customers with a pending (not completed) inward DC
 router.get("/clients/search", async (req, res) => {
   try {
     const { q } = req.query;
@@ -61,8 +65,12 @@ router.get("/clients/search", async (req, res) => {
       `SELECT DISTINCT ie.supplier_name AS customer_name
        FROM inward_entry ie
        WHERE ie.supplier_name LIKE ?
+       AND ie.dc_number IS NOT NULL AND ie.dc_number != ''
        AND NOT EXISTS (
-           SELECT 1 FROM service_dc_entries sde WHERE sde.party_dc_no = ie.dc_number
+           SELECT 1 FROM order_status os
+           WHERE os.order_no = ie.dc_number
+             AND os.dc_type = 'Service'
+             AND os.status = 'Completed'
        )
        ORDER BY ie.supplier_name ASC LIMIT 20`,
       [`%${q || ""}%`]
@@ -74,15 +82,19 @@ router.get("/clients/search", async (req, res) => {
   }
 });
 
-// Client DC numbers from inward_entry filtered by client name
+// Client DC numbers from inward_entry filtered by client name — only pending (not completed)
 router.get("/client-dc-list", async (req, res) => {
   try {
     const { client, q } = req.query;
-    let query = ` SELECT ie.dc_number, ie.dc_date 
-    FROM inward_entry ie WHERE NOT EXISTS (
-   SELECT 1
-   FROM service_dc_entries sde
-   WHERE sde.party_dc_no = ie.dc_number)`
+    let query = `SELECT ie.dc_number, ie.dc_date 
+    FROM inward_entry ie
+    WHERE ie.dc_number IS NOT NULL AND ie.dc_number != ''
+    AND NOT EXISTS (
+      SELECT 1 FROM order_status os
+      WHERE os.order_no = ie.dc_number
+        AND os.dc_type = 'Service'
+        AND os.status = 'Completed'
+    )`;
     const params = [];
     if (client) { query += " AND supplier_name = ?"; params.push(client); }
     if (q) { query += " AND dc_number LIKE ?"; params.push(`%${q}%`); }
@@ -197,60 +209,86 @@ router.post("/createdc", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    // Generate the DC number server-side at save time so it is always
-    // correct and unique, even if the form-preview number went stale
-    const dcNo = await generateNextDcNo();
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
 
-    const [result] = await db.promise().query(
-      `INSERT INTO service_dc_entries
-      (supplier_name, inward_dc_no, dc_date, party_dc_no, party_dc_date, payment_terms, despatch_through)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        s.supplier_name,
-        dcNo,
-        emptyToNull(s.dc_date),
-        emptyToNull(s.party_dc_no),
-        emptyToNull(s.party_dc_date),
-        s.payment_terms || "",
-        emptyToNull(s.despatch_through)
-      ]
-    );
+    const conn = await db.promise().getConnection();
+    try {
+      await conn.beginTransaction();
 
-    const newDcEntryId = result.insertId;
+      // Atomically get & increment the shared counter inside the transaction
+      const dcNo = await getAndIncrementDcNumber(conn);
 
-    for (const item of items) {
-      await db.promise().query(
-        `INSERT INTO service_dc_items
-        (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      const [result] = await conn.query(
+        `INSERT INTO service_dc_entries
+        (supplier_name, inward_dc_no, dc_date, party_dc_no, party_dc_date, payment_terms, despatch_through)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
-          newDcEntryId,
-          emptyToNull(item.item_name),
-          toNum(item.quantity, null),
-          emptyToNull(item.serial_no),
-          emptyToNull(item.uom),
-          emptyToNull(item.hsn),
-          emptyToNull(item.remarks),
-          emptyToNull(item.party_dc_no),
-          emptyToNull(item.party_dc_date)
+          s.supplier_name,
+          dcNo,
+          emptyToNull(s.dc_date),
+          emptyToNull(s.party_dc_no),
+          emptyToNull(s.party_dc_date),
+          s.payment_terms || "",
+          emptyToNull(s.despatch_through)
         ]
       );
-    }
 
-    // Mark ALL unique party DC nos (from items) as "DC Created"
-    const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
-    if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
-    for (const dcNo of uniquePartyDcNos) {
-      try {
-        await db.promise().query(
-          `UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`,
-          [dcNo]
+      const newDcEntryId = result.insertId;
+
+      for (const item of items) {
+        await conn.query(
+          `INSERT INTO service_dc_items
+          (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newDcEntryId,
+            emptyToNull(item.item_name),
+            toNum(item.quantity, null),
+            emptyToNull(item.serial_no),
+            emptyToNull(item.uom),
+            emptyToNull(item.hsn),
+            emptyToNull(item.remarks),
+            emptyToNull(item.party_dc_no),
+            emptyToNull(item.party_dc_date)
+          ]
         );
+      }
+
+      await conn.commit();
+
+      // Best-effort status updates (outside transaction — failure won't roll back DC creation)
+      try {
+        const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
+        if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
+        for (const pdcNo of uniquePartyDcNos) {
+          await db.promise().query(
+            `UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`,
+            [pdcNo]
+          );
+        }
       } catch (_) {}
+
+      try {
+        const allOrderNos = (s.party_dc_no || "").split(",").map(s => s.trim()).filter(Boolean);
+        for (const orderNo of allOrderNos) {
+          await db.promise().query(
+            `INSERT INTO order_status (customer_name, order_no, dc_type, status)
+             VALUES (?, ?, 'Service', 'Completed')
+             ON DUPLICATE KEY UPDATE status = 'Completed'`,
+            [s.supplier_name, orderNo]
+          );
+        }
+      } catch (_) {}
+
+      res.status(201).json({ message: "DC Entry created successfully", dc_no: dcNo });
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
     }
-
-    res.status(201).json({ message: "DC Entry created successfully", dc_no: dcNo });
-
   } catch (error) {
     console.error("Error creating DC Entry:", error);
     res.status(500).json({ message: "Internal Server Error" });
@@ -266,45 +304,73 @@ router.put("/updatedc/:id", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    // Update the main entry
-    await db.promise().query(
-      `UPDATE service_dc_entries
-       SET supplier_name=?, inward_dc_no=?, dc_date=?, party_dc_no=?,
-           party_dc_date=?, payment_terms=?, despatch_through=?
-       WHERE id=?`,
-      [
-        s.supplier_name,
-        s.inward_dc_no,
-        emptyToNull(s.dc_date),
-        emptyToNull(s.party_dc_no),
-        emptyToNull(s.party_dc_date),
-        s.payment_terms || "",
-        emptyToNull(s.despatch_through),
-        dcId
-      ]
-    );
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
 
-    // Delete existing items
-    await db.promise().query("DELETE FROM service_dc_items WHERE service_dc_id=?", [dcId]);
+    const conn = await db.promise().getConnection();
+    try {
+      await conn.beginTransaction();
 
-    // Insert updated items
-    for (const item of items) {
-      await db.promise().query(
-        "INSERT INTO service_dc_items (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [dcId, emptyToNull(item.item_name), toNum(item.quantity, null), emptyToNull(item.serial_no), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks), emptyToNull(item.party_dc_no), emptyToNull(item.party_dc_date)]
+      // Update the main entry
+      await conn.query(
+        `UPDATE service_dc_entries
+         SET supplier_name=?, inward_dc_no=?, dc_date=?, party_dc_no=?,
+             party_dc_date=?, payment_terms=?, despatch_through=?
+         WHERE id=?`,
+        [
+          s.supplier_name,
+          s.inward_dc_no,
+          emptyToNull(s.dc_date),
+          emptyToNull(s.party_dc_no),
+          emptyToNull(s.party_dc_date),
+          s.payment_terms || "",
+          emptyToNull(s.despatch_through),
+          dcId
+        ]
       );
-    }
 
-    // Mark all unique party DC nos from items as "DC Created"
-    const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
-    if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
-    for (const dcNo of uniquePartyDcNos) {
+      // Delete existing items
+      await conn.query("DELETE FROM service_dc_items WHERE service_dc_id=?", [dcId]);
+
+      // Insert updated items
+      for (const item of items) {
+        await conn.query(
+          "INSERT INTO service_dc_items (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [dcId, emptyToNull(item.item_name), toNum(item.quantity, null), emptyToNull(item.serial_no), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks), emptyToNull(item.party_dc_no), emptyToNull(item.party_dc_date)]
+        );
+      }
+
+      await conn.commit();
+
+      // Best-effort status updates (outside transaction)
       try {
-        await db.promise().query(`UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`, [dcNo]);
+        const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
+        if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
+        for (const pdcNo of uniquePartyDcNos) {
+          await db.promise().query(`UPDATE inward_entry SET status = 'DC Created' WHERE dc_number = ?`, [pdcNo]);
+        }
       } catch (_) {}
-    }
 
-    res.json({ message: "DC Entry updated successfully" });
+      try {
+        const allOrderNos = (s.party_dc_no || "").split(",").map(s => s.trim()).filter(Boolean);
+        for (const orderNo of allOrderNos) {
+          await db.promise().query(
+            `INSERT INTO order_status (customer_name, order_no, dc_type, status)
+             VALUES (?, ?, 'Service', 'Completed')
+             ON DUPLICATE KEY UPDATE status = 'Completed'`,
+            [s.supplier_name, orderNo]
+          );
+        }
+      } catch (_) {}
+
+      res.json({ message: "DC Entry updated successfully" });
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
   } catch (error) {
     console.error("Error updating DC Entry:", error);
     res.status(500).json({ message: "Internal Server Error" });
@@ -441,15 +507,9 @@ router.get("/full/:dc_number", async (req, res) => {
 
     // Aggregate unique party DC nos and dates from item level
     const uniqueDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
-    const uniqueDcDates = [...new Set(
-      items.map(i => {
-        if (!i.party_dc_date) return null;
-        const d = new Date(i.party_dc_date);
-        return d.toISOString().split('T')[0];
-      }).filter(Boolean)
-    )];
+    const uniqueDcDates = [...new Set(items.map(i => i.party_dc_date).filter(Boolean))];
     const aggregatedDcNo = uniqueDcNos.length > 0 ? uniqueDcNos.join(',') : (dcEntry.party_dc_no || '');
-    const aggregatedDcDate = uniqueDcDates.length > 0 ? uniqueDcDates.join(',') : (dcEntry.party_dc_date ? new Date(dcEntry.party_dc_date).toISOString().split('T')[0] : '');
+    const aggregatedDcDate = uniqueDcDates.length > 0 ? uniqueDcDates.join(',') : (dcEntry.party_dc_date || '');
 
     // CLIENT
     const [clientRows] = await db.promise().query(

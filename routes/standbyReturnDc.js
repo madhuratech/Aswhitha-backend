@@ -116,6 +116,9 @@ router.post("/createdc", async (req, res) => {
     if (!s.return_dc_no || !s.standby_dc_no || !s.customer_name) {
       return res.status(400).json({ message: "Required fields missing" });
     }
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
 
     // Insert Return DC Entry
     const [result] = await db.promise().query(
@@ -190,6 +193,9 @@ router.put("/updatedc/:return_dc_no", async (req, res) => {
 
     if (!s.standby_dc_no || !s.customer_name) {
       return res.status(400).json({ message: "Required fields missing" });
+    }
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 
     // 1. Get existing Return DC Entry

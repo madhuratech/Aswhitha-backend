@@ -15,45 +15,16 @@ const axios = require("axios");
   }
 })();
 
-// INVOICE GENTRATE
-
-async function GenerateInvoiceNumber() {
-    const [rows] = await db.promise().query(`
-        SELECT invoice_no FROM salesinvoice
-        UNION ALL
-        SELECT invoice_no FROM service_invoices
-        UNION ALL
-        SELECT invoice_no FROM directinvoice
-    `);
-
-    let maxNumber = 0;
-
-    rows.forEach(row => {
-        if (!row.invoice_no) return;
-
-        const match = row.invoice_no.match(/AT\/INV\/?(\d+)/);
-
-        if (match) {
-            maxNumber = Math.max(
-                maxNumber,
-                parseInt(match[1], 10)
-            );
-        }
-    });
-
-    const nextNumber = maxNumber + 1;
-
-    return `AT/INV/${String(nextNumber).padStart(3, "0")}`;
-}
+const { generateNextInvoiceNo } = require("../helpers/invoiceNumber");
 
 // Get Bill No
-router.get("/next-In-billno", async (req,res) =>{
-    try{
-        const InvoiceNumber = await GenerateInvoiceNumber();
-        res.json({invoice_no : InvoiceNumber}); 
-    }catch(error){
+router.get("/next-In-billno", async (req, res) => {
+    try {
+        const invoice_no = await generateNextInvoiceNo();
+        res.json({ invoice_no });
+    } catch (error) {
         console.error("Error Generating Invoice Number:", error);
-        res.status(500).json({message: error.message});
+        res.status(500).json({ message: error.message });
     }
 });
 
@@ -171,6 +142,10 @@ router.post('/new', async (req, res) => {
             grandtotal
         } = req.body;
 
+        if (!dispatch_through?.trim()) {
+            return res.status(400).json({ message: "Despatch Through cannot be null." });
+        }
+
         try {
             const [result] = await db.promise().query(
                 `INSERT INTO directinvoice 
@@ -217,6 +192,20 @@ router.post('/new', async (req, res) => {
                     ]
                 );
             }
+
+            // Mark DC numbers as completed in dc_status
+            if (dc_no) {
+                const dcNos = (dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
+                for (const dcNo of dcNos) {
+                    await db.promise().query(
+                        `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
+                         VALUES (?, 'DirectDC', 'Completed', 'DirectInvoice')
+                         ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'DirectInvoice'`,
+                        [dcNo]
+                    );
+                }
+            }
+
             return res.json({ message: "Invoice Created Successfully", invoiceId, invoice_no: invoice_no });
         } catch (error) {
             if (error.code === 'ER_DUP_ENTRY' && attempts < MAX_ATTEMPTS) {
@@ -256,6 +245,10 @@ router.put('/update/:invoiceNo', async(req, res) => {
             grandtotal,
             items
         } = req.body;
+
+        if (!dispatch_through?.trim()) {
+            return res.status(400).json({ message: "Despatch Through cannot be null." });
+        }
 
         // Get the Invoice ID
         const [invoiceRows] = await db.promise().query(
@@ -312,6 +305,20 @@ router.put('/update/:invoiceNo', async(req, res) => {
                 ]
             );
         }
+
+        // Mark DC numbers as completed in dc_status
+        if (dc_no) {
+            const dcNos = (dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
+            for (const dcNo of dcNos) {
+                await db.promise().query(
+                    `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
+                     VALUES (?, 'DirectDC', 'Completed', 'DirectInvoice')
+                     ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'DirectInvoice'`,
+                    [dcNo]
+                );
+            }
+        }
+
         res.json({message: "Invoice Updated Successfully"});
     }catch(error){
         console.error("Error Updating Invoice:", error);

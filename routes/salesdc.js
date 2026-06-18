@@ -2,15 +2,15 @@ const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
-const { generateNextDcNo } = require("../helpers/dcNumber");
+const { getCurrentDcNumber, getAndIncrementDcNumber } = require("../helpers/dcNumber");
 
-// Get next Admin DC No — common sequence shared with Service DC
+// Get next DC No from shared counter
 router.get("/next-dc-no", async (req, res) => {
     try {
-        const dc_no = await generateNextDcNo();
+        const dc_no = await getCurrentDcNumber();
         res.json({ dc_no });
     } catch (error) {
-        console.error("Error generating DC No:", error);
+        console.error("Error reading DC counter:", error);
         res.status(500).json({ message: error.message });
     }
 });
@@ -66,14 +66,16 @@ router.post("/new", async (req, res) => {
     if (!s.customer_name || !s.order_no || !items.length) {
         return res.status(400).json({ message: "Customer, Client DC No and at least one item are required" });
     }
+    if (!s.despatch_through?.trim()) {
+        return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
 
     const conn = await db.promise().getConnection();
     try {
         await conn.beginTransaction();
 
-        // Regenerate the DC number at save time from the shared sequence so it
-        // is unique even if the form-preview number went stale meanwhile
-        s.dc_no = await generateNextDcNo(conn);
+        // Atomically get & increment the shared counter inside the transaction
+        s.dc_no = await getAndIncrementDcNumber(conn);
 
         const [result] = await conn.query(
             `INSERT INTO sales_dc_entries
@@ -126,6 +128,9 @@ router.put("/update/:dc_no", async (req, res) => {
 
     if (!s.customer_name || !s.dc_no || !s.payment_terms || !items.length) {
         return res.status(400).json({ message: "Customer, Admin DC No, Client DC No and at least one item are required" });
+    }
+    if (!s.despatch_through?.trim()) {
+        return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 
     const conn = await db.promise().getConnection();
@@ -254,12 +259,7 @@ router.get("/full/:dc_no", async (req, res) => {
   .filter(Boolean);
 
 const allDcDates = itemRows
-  .map(item => {
-    if (!item.order_date) return null;
-    return new Date(item.order_date)
-      .toISOString()
-      .split("T")[0];
-  })
+  .map(item => item.order_date)
   .filter(Boolean);
 
       res.json({
@@ -275,18 +275,40 @@ const allDcDates = itemRows
   aggregated_order_date:
     allDcDates.length
       ? allDcDates.join(", ")
-      : (
-          dcEntry.order_date
-            ? new Date(dcEntry.order_date)
-                .toISOString()
-                .split("T")[0]
-            : ""
-        )
+      : (dcEntry.order_date || "")
 });
 
     } catch (error) {
         console.error("Error fetching full Sales DC:", error);
         res.status(500).json({ message: "Internal Server Error" });
+    }
+});
+
+// Fetch order date for a given order number (from inward_entry or existing sales_dc_entries)
+router.get("/order-date", async (req, res) => {
+    const { order_no } = req.query;
+    if (!order_no) return res.status(400).json({ message: "order_no is required" });
+    try {
+        // Try inward_entry first
+        const [inwardRows] = await db.promise().query(
+            "SELECT dc_date FROM inward_entry WHERE dc_number = ? ORDER BY id DESC LIMIT 1",
+            [order_no]
+        );
+        if (inwardRows.length) {
+            return res.json({ order_date: inwardRows[0].dc_date || "" });
+        }
+        // Fallback to sales_dc_entries
+        const [dcRows] = await db.promise().query(
+            "SELECT order_date FROM sales_dc_entries WHERE order_no LIKE ? ORDER BY id DESC LIMIT 1",
+            [`%${order_no}%`]
+        );
+        if (dcRows.length) {
+            return res.json({ order_date: dcRows[0].order_date || "" });
+        }
+        res.json({ order_date: "" });
+    } catch (error) {
+        console.error("Error fetching order date:", error);
+        res.status(500).json({ message: "Server Error" });
     }
 });
 

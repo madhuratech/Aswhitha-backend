@@ -187,6 +187,9 @@ router.get("/items/search", async(req,res) => {
 router.post("/new", async(req,res) =>{
    try{
     const {supplier_name, bill_no, bill_date, order_no, order_date, other_name , despatch, due_date, order_type, discount, other_charges,subtotal, cgst, sgst, igst, round_off, grand_total, items} = req.body;
+    if (!despatch?.trim()) {
+        return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
      const billNumber = await generateBillNo();
      const [result] = await db.promise().query(
         "INSERT INTO purchase_entry (supplier_name, bill_no, bill_date, order_no, order_date, other_name, despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -215,6 +218,10 @@ router.put("/update/:billNo", async(req, res) => {
     try{
         const {billNo} = req.params;
         const {supplier_name, bill_no, bill_date, order_no, order_date, despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total, items} = req.body;
+
+        if (!despatch?.trim()) {
+            return res.status(400).json({ message: "Despatch Through cannot be null." });
+        }
 
         // Get the purchase entry ID
         const [purchaseRows] = await db.promise().query(

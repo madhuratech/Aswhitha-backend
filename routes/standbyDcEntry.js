@@ -13,7 +13,7 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
         dc_date DATE NOT NULL,
         customer_name VARCHAR(255) NOT NULL,
         order_no VARCHAR(100) NOT NULL,
-        order_date DATE,
+        order_date VARCHAR(500),
         payment_terms VARCHAR(100),
         despatch_through VARCHAR(100),
         order_type VARCHAR(50) DEFAULT 'Service',
@@ -92,6 +92,10 @@ router.post("/createdc", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
+
     const [result] = await db.promise().query(
       `INSERT INTO standby_dc_entries
       (standby_dc_no, dc_date, customer_name, order_no, order_date, payment_terms, despatch_through, order_type, purpose)
@@ -146,6 +150,10 @@ router.put("/updatedc/:id", async (req, res) => {
     const dcId = req.params.id;
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
+
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
 
     await db.promise().query(
       `UPDATE standby_dc_entries

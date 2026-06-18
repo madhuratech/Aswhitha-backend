@@ -34,6 +34,20 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
       )
     `);
     
+    // Ensure order_no and order_date columns exist in job_dc_entries
+    await db.promise().query(
+      "ALTER TABLE job_dc_entries ADD COLUMN order_no VARCHAR(500) DEFAULT NULL"
+    ).catch(() => {});
+    await db.promise().query(
+      "ALTER TABLE job_dc_entries ADD COLUMN order_date VARCHAR(500) DEFAULT NULL"
+    ).catch(() => {});
+    await db.promise().query(
+      "ALTER TABLE job_dc_items ADD COLUMN order_no VARCHAR(500) DEFAULT NULL"
+    ).catch(() => {});
+    await db.promise().query(
+      "ALTER TABLE job_dc_items ADD COLUMN order_date VARCHAR(500) DEFAULT NULL"
+    ).catch(() => {});
+
     // Safety check: ensure description column exists in job_dc_items
     await db.promise().query(
       "ALTER TABLE job_dc_items ADD COLUMN description TEXT DEFAULT NULL"
@@ -105,18 +119,22 @@ router.post("/createdc", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
+
     const [result] = await db.promise().query(
       `INSERT INTO job_dc_entries
-      (job_dc_no, dc_date, customer_name, is_returnable, despatch_through,order_no, order_date, purpose, order_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      (job_dc_no, dc_date, customer_name, is_returnable, despatch_through, order_no, order_date, purpose, order_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         s.job_dc_no,
         emptyToNull(s.dc_date),
         s.customer_name,
         s.is_returnable || "No",
+        emptyToNull(s.despatch_through),
         emptyToNull(s.order_no),
         emptyToNull(s.order_date),
-        emptyToNull(s.despatch_through),
         emptyToNull(s.purpose),
         s.order_type || "Service"
       ]
@@ -160,10 +178,14 @@ router.put("/updatedc/:id", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
+    if (!s.despatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
+
     await db.promise().query(
       `UPDATE job_dc_entries
        SET job_dc_no=?, dc_date=?, customer_name=?, is_returnable=?,
-           despatch_through=?, purpose=?, order_type=?
+           despatch_through=?, order_no=?, order_date=?, purpose=?, order_type=?
        WHERE id=?`,
       [
         s.job_dc_no,
@@ -171,6 +193,8 @@ router.put("/updatedc/:id", async (req, res) => {
         s.customer_name,
         s.is_returnable || "No",
         emptyToNull(s.despatch_through),
+        emptyToNull(s.order_no),
+        emptyToNull(s.order_date),
         emptyToNull(s.purpose),
         s.order_type || "Service",
         dcId

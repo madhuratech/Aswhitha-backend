@@ -3,58 +3,17 @@ const router = express.Router();
 const db = require("../config/database");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
-// Generate shared invoice number across service_invoices, directinvoice, salesinvoice
-async function GenerateInvoiceNumber() {
-    const [rows] = await db.promise().query(`
-        SELECT invoice_no FROM salesinvoice
-        UNION ALL
-        SELECT invoice_no FROM service_invoices
-        UNION ALL
-        SELECT invoice_no FROM directinvoice
-    `);
-
-    let maxNumber = 0;
-
-    rows.forEach(row => {
-        if (!row.invoice_no) return;
-
-        const match = row.invoice_no.match(/AT\/INV\/?(\d+)/);
-
-        if (match) {
-            maxNumber = Math.max(
-                maxNumber,
-                parseInt(match[1], 10)
-            );
-        }
-    });
-
-    const nextNumber = maxNumber + 1;
-
-    return `AT/INV/${String(nextNumber).padStart(3, "0")}`;
-}
+const { generateNextInvoiceNo } = require("../helpers/invoiceNumber");
 
 // Auto Invoice Number
-
 router.get("/next-SV-no", async (req, res) => {
-
   try {
-
-    const invoice_no = await GenerateInvoiceNumber();
-
-    res.json({
-      invoice_no
-    });
-
+    const invoice_no = await generateNextInvoiceNo();
+    res.json({ invoice_no });
   } catch (error) {
-
     console.log(error);
-
-    res.status(500).json({
-      message: "Failed To Generate Invoice Number"
-    });
-
+    res.status(500).json({ message: "Failed To Generate Invoice Number" });
   }
-
 });
 
 
@@ -182,11 +141,13 @@ router.get("/service-dc/search", async (req, res) => {
       FROM service_dc_entries sde
       WHERE 1=1
 
-      -- Only non-invoiced DCs
+      -- Only non-invoiced DCs (via dc_status)
       AND NOT EXISTS (
           SELECT 1
-          FROM service_invoices si
-          WHERE si.dc_no = sde.inward_dc_no
+          FROM dc_status ds
+          WHERE ds.dc_number = sde.inward_dc_no
+          AND ds.dc_type = 'ServiceDC'
+          AND ds.status = 'Completed'
       )
 
       -- Only DCs with at least one invoice-eligible item (Serviced / For Sale)
@@ -275,10 +236,7 @@ router.get("/service-dc/by-admin/:adminDcNo", async (req, res) => {
     );
 
     const allOrderNos = items.map(item => item.party_dc_no).filter(Boolean);
-    const allOrderDates = items.map(item => {
-        if (!item.party_dc_date) return null;
-        return new Date(item.party_dc_date).toISOString().split("T")[0];
-    }).filter(Boolean);
+    const allOrderDates = items.map(item => item.party_dc_date).filter(Boolean);
 
     const aggregated_order_no = allOrderNos.length
         ? [...new Set(allOrderNos)].join(", ")
@@ -286,9 +244,7 @@ router.get("/service-dc/by-admin/:adminDcNo", async (req, res) => {
 
     const aggregated_order_date = allOrderDates.length
         ? [...new Set(allOrderDates)].join(", ")
-        : (header.dc_date
-            ? new Date(header.dc_date).toISOString().split("T")[0]
-            : "");
+        : (header.party_dc_date || "");
 
     res.json({ header, items, aggregated_order_no, aggregated_order_date });
 
@@ -382,6 +338,9 @@ router.post("/create", async (req, res) => {
   while (attempts < MAX_ATTEMPTS) {
     attempts++;
     const s = sanitizeBody(req.body);
+    if (!s.dispatch_through?.trim()) {
+      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    }
 
     try {
       // Prevent duplicate invoice for the same DC
@@ -444,6 +403,19 @@ router.post("/create", async (req, res) => {
             emptyToNull(item.dc_date)
           ]
         );
+      }
+
+      // Mark DC numbers as completed in dc_status
+      if (s.dc_no) {
+        const dcNos = (s.dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
+        for (const dcNo of dcNos) {
+          await db.promise().query(
+            `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
+             VALUES (?, 'ServiceDC', 'Completed', 'ServiceInvoice')
+             ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'ServiceInvoice'`,
+            [dcNo]
+          );
+        }
       }
 
       return res.json({ message: "Invoice Saved Successfully", invoice_no: s.invoice_no });
@@ -565,6 +537,10 @@ router.put("/update/:invoice_no", async (req, res) => {
         const s = sanitizeBody(req.body);
         const items = Array.isArray(req.body.items) ? req.body.items : [];
 
+        if (!s.dispatch_through?.trim()) {
+            return res.status(400).json({ message: "Despatch Through cannot be null." });
+        }
+
         const [existing] = await db.promise().query(
             "SELECT id FROM service_invoices WHERE invoice_no = ?",
             [invoice_no]
@@ -610,6 +586,19 @@ router.put("/update/:invoice_no", async (req, res) => {
                     emptyToNull(item.dc_date)
                 ]
             );
+        }
+
+        // Mark DC numbers as completed in dc_status
+        if (s.dc_no) {
+            const dcNos = (s.dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
+            for (const dcNo of dcNos) {
+                await db.promise().query(
+                    `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
+                     VALUES (?, 'ServiceDC', 'Completed', 'ServiceInvoice')
+                     ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'ServiceInvoice'`,
+                    [dcNo]
+                );
+            }
         }
 
         res.json({ message: "Invoice Updated" });

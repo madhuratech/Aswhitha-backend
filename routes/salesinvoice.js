@@ -3,41 +3,13 @@ const router = express.Router();
 const db = require("../config/database");
 const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
-// INVOICE GENTRATE
-async function GenerateInvoiceNumber() {
-    const [rows] = await db.promise().query(`
-        SELECT invoice_no FROM salesinvoice
-        UNION ALL
-        SELECT invoice_no FROM service_invoices
-        UNION ALL
-        SELECT invoice_no FROM directinvoice
-    `);
-
-    let maxNumber = 0;
-
-    rows.forEach(row => {
-        if (!row.invoice_no) return;
-
-        const match = row.invoice_no.match(/AT\/INV\/?(\d+)/);
-
-        if (match) {
-            maxNumber = Math.max(
-                maxNumber,
-                parseInt(match[1], 10)
-            );
-        }
-    });
-
-    const nextNumber = maxNumber + 1;
-
-    return `AT/INV/${String(nextNumber).padStart(3, "0")}`;
-}
+const { generateNextInvoiceNo } = require("../helpers/invoiceNumber");
 
 // Get Bill No
 router.get("/next-In-billno", async (req, res) => {
     try {
-        const InvoiceNumber = await GenerateInvoiceNumber();
-        res.json({ invoice_no: InvoiceNumber });
+        const invoice_no = await generateNextInvoiceNo();
+        res.json({ invoice_no });
     } catch (error) {
         console.error("Error Generating Invoice Number:", error);
         res.status(500).json({ message: error.message });
@@ -127,11 +99,13 @@ router.get('/sales-dc/search', async (req, res) => {
                 AND sdi.remarks IN ('Serviced', 'For Sale')
             )
 
-            -- Hide Already Invoiced DC
+            -- Hide Already Invoiced DC (via dc_status)
             AND NOT EXISTS (
                 SELECT 1
-                FROM salesinvoice si
-                WHERE si.dc_no = sde.dc_no
+                FROM dc_status ds
+                WHERE ds.dc_number = sde.dc_no
+                AND ds.dc_type = 'SalesDC'
+                AND ds.status = 'Completed'
             )
     `;
 
@@ -166,10 +140,7 @@ router.get('/sales-dc/:dcNo', async (req, res) => {
         WHERE dc_id = ? AND remarks IN ('Serviced', 'For Sale')`, [dcEntry.id]);
 
         const allOrderNos = itemRows.map(item => item.order_no).filter(Boolean);
-        const allOrderDates = itemRows.map(item => {
-            if (!item.order_date) return null;
-            return new Date(item.order_date).toISOString().split("T")[0];
-        }).filter(Boolean);
+        const allOrderDates = itemRows.map(item => item.order_date).filter(Boolean);
 
         const aggregated_order_no = allOrderNos.length
             ? [...new Set(allOrderNos)].join(", ")
@@ -177,9 +148,7 @@ router.get('/sales-dc/:dcNo', async (req, res) => {
 
         const aggregated_order_date = allOrderDates.length
             ? [...new Set(allOrderDates)].join(", ")
-            : (dcEntry.order_date
-                ? new Date(dcEntry.order_date).toISOString().split("T")[0]
-                : "");
+            : (dcEntry.order_date || "");
 
         res.json({ header: dcEntry, items: itemRows, aggregated_order_no, aggregated_order_date });
     } catch (error) {
@@ -254,6 +223,9 @@ router.post('/new', async (req, res) => {
     while (attempts < MAX_ATTEMPTS) {
         attempts++;
         const s = sanitizeBody(req.body);
+        if (!s.dispatch_through?.trim()) {
+            return res.status(400).json({ message: "Despatch Through cannot be null." });
+        }
         const conn = await db.promise().getConnection();
         try {
             await conn.beginTransaction();
@@ -306,6 +278,19 @@ router.post('/new', async (req, res) => {
                 ]);
             }
 
+            // Mark DC numbers as completed in dc_status
+            if (s.dc_no) {
+                const dcNos = (s.dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
+                for (const dcNo of dcNos) {
+                    await conn.query(
+                        `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
+                         VALUES (?, 'SalesDC', 'Completed', 'SalesInvoice')
+                         ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'SalesInvoice'`,
+                        [dcNo]
+                    );
+                }
+            }
+
             await conn.commit();
             return res.json({ message: "Sales Invoice Created Successfully", invoiceId, invoice_no: s.invoice_no });
         } catch (error) {
@@ -332,6 +317,9 @@ router.put('/update/:invoiceNo', async (req, res) => {
 
     if (!s.customer_name || !s.invoice_no || !s.invoice_date || !items.length) {
         return res.status(400).json({ message: "Customer, Invoice No, Invoice Date and at least one item are required" });
+    }
+    if (!s.dispatch_through?.trim()) {
+        return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 
     const conn = await db.promise().getConnection();
@@ -380,6 +368,19 @@ router.put('/update/:invoiceNo', async (req, res) => {
                 emptyToNull(item.dc_no),
                 emptyToNull(item.dc_date)
             ]);
+        }
+
+        // Mark DC numbers as completed in dc_status
+        if (s.dc_no) {
+            const dcNos = (s.dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
+            for (const dcNo of dcNos) {
+                await conn.query(
+                    `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
+                     VALUES (?, 'SalesDC', 'Completed', 'SalesInvoice')
+                     ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'SalesInvoice'`,
+                    [dcNo]
+                );
+            }
         }
 
         await conn.commit();

@@ -16,7 +16,14 @@ async function main() {
         { table: "service_invoices", col: "order_date" },
         { table: "directinvoice", col: "order_date" },
         { table: "salesinvoice_items", col: "order_date" },
-        { table: "service_invoice_items", col: "order_date" }
+        { table: "service_invoice_items", col: "order_date" },
+        { table: "invoice_items", col: "order_date" },
+        { table: "sales_dc_entries", col: "order_date" },
+        { table: "sales_dc_items", col: "order_date" },
+        { table: "standby_dc_entries", col: "order_date" },
+        { table: "job_dc_entries", col: "order_date" },
+        { table: "job_dc_items", col: "order_date" },
+        { table: "purchase_entry", col: "order_date" }
     ];
 
     for (const item of tablesToAlter) {
@@ -39,8 +46,8 @@ async function main() {
                 continue;
             }
 
-            console.log(`Altering ${item.table}.${item.col} to VARCHAR(255)...`);
-            await conn.query(`ALTER TABLE ${item.table} MODIFY COLUMN ${item.col} VARCHAR(255) NULL`);
+            console.log(`Altering ${item.table}.${item.col} to VARCHAR(500)...`);
+            await conn.query(`ALTER TABLE ${item.table} MODIFY COLUMN ${item.col} VARCHAR(500) NULL`);
             console.log(`Successfully altered ${item.table}.${item.col}`);
         } catch (err) {
             console.error(`Failed to alter ${item.table}.${item.col}:`, err.message);

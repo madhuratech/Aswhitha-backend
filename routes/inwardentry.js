@@ -111,16 +111,20 @@ router.post("/new", async (req, res) => {
 
 // Update Inward Entry
 
-router.put("/update/:dc_number", async (req, res) => {
+router.put("/update/:sl_no", async (req, res) => {
   try {
-    const { dc_number } = req.params;
+    const { sl_no } = req.params;
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
     const [rows] = await db.promise().query(
-      "SELECT id FROM inward_entry WHERE dc_number = ?",
-      [dc_number]
+      "SELECT id FROM inward_entry WHERE sl_no = ?",
+      [sl_no]
     );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: "Not found" });
+    }
 
     const inwardId = rows[0].id;
 
@@ -212,13 +216,13 @@ router.get("/edit/:dc_number", async (req, res) => {
 
 
 // delete
-router.delete("/delete/:dc_number", async (req, res) => {
+router.delete("/delete/:sl_no", async (req, res) => {
   try {
-    const { dc_number } = req.params;
+    const { sl_no } = req.params;
 
     const [rows] = await db.promise().query(
-      "SELECT id FROM inward_entry WHERE dc_number=?",
-      [dc_number]
+      "SELECT id FROM inward_entry WHERE sl_no=?",
+      [sl_no]
     );
 
     if (!rows.length) {
