@@ -32,7 +32,7 @@ router.get("/next-In-billno", async (req, res) => {
 
 router.get("/clients", async (req, res) => {
     try{
-        const [rows] = await db.promise().query("SELECT id, customer_name  FROM newclient ORDER BY customer_name ASC");
+        const [rows] = await db.promise().query("SELECT id, customer_name, state, gst_number FROM newclient ORDER BY customer_name ASC");
         res.json(rows);
     }catch(error){
         console.error("Error fetching clients:", error);
@@ -398,13 +398,30 @@ router.get('/edit/:invoiceNo', async (req, res) => {
     }
 });
 
+// Get all direct invoices for report
+router.get('/report/all', async (req, res) => {
+    try {
+        const [rows] = await db.promise().query(
+            `SELECT d.*, COUNT(i.id) AS item_count
+             FROM directinvoice d
+             LEFT JOIN invoice_items i ON d.id = i.invoice_id
+             GROUP BY d.id
+             ORDER BY d.invoice_date DESC, d.id DESC`
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error("Error fetching Direct Invoice report:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+    }
+});
+
 // invoicenumber search
 router.get('/INV/search', async(req,res) =>{
     const {q} = req.query;
     const searchTerm = `%${q || ""}%`;
     try{
         const [rows] = await db.promise().query(
-            "SELECT invoice_no FROM directinvoice WHERE invoice_no LIKE ?",
+            "SELECT invoice_no FROM directinvoice WHERE invoice_no LIKE ? ORDER BY id DESC",
             [searchTerm]
         );
         res.json(rows);

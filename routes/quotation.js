@@ -44,7 +44,7 @@ router.get("/next-Qt-billno", async (req,res) =>{
 router.get("/clients", async(req, res) => {
     try{
         const[rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC "
+            "SELECT id, customer_name, state, gst_number FROM newclient ORDER BY customer_name ASC "
          );
          res.json(rows);
     }catch(error){
@@ -274,9 +274,16 @@ router.get('/edit/:quotationNo', async (req, res) => {
       [quotation.id]
     );
 
+    // Fetch client details for GST state detection
+    const [clientRows] = await db.promise().query(
+      "SELECT state, gst_number FROM newclient WHERE customer_name = ?",
+      [quotation.customer_name]
+    );
+
     res.json({
       header: quotation,
-      items: itemRows
+      items: itemRows,
+      client: clientRows[0] || {}
     });
 
   } catch (error) {

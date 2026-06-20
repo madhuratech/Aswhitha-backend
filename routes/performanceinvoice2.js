@@ -18,7 +18,7 @@ router.get("/next-In-billno", async (req, res) => {
 router.get("/clients", async (req, res) => {
     try {
         const [rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC"
+            "SELECT id, customer_name, state, gst_number FROM newclient ORDER BY customer_name ASC"
         );
         res.json(rows);
     } catch (error) {
@@ -103,7 +103,6 @@ router.post("/new", async (req, res) => {
             dc_date,
             order_no,
             order_date,
-            payment_terms,
             dispatch_through,
             discount,
             transport,
@@ -124,9 +123,9 @@ router.post("/new", async (req, res) => {
             const [result] = await db.promise().query(
                 `INSERT INTO performance_invoice2_header
                  (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date,
-                  payment_terms, dispatch_through, discount, transport, subtotal, ordertype,
+                  dispatch_through, discount, transport, subtotal, ordertype,
                   cgst, sgst, igst, round_off, grandtotal)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     customer_name,
                     invoice_no,
@@ -135,7 +134,6 @@ router.post("/new", async (req, res) => {
                     dc_date || null,
                     order_no || null,
                     order_date || null,
-                    payment_terms || null,
                     dispatch_through || null,
                     discount || 0,
                     transport || 0,
@@ -195,7 +193,6 @@ router.put("/update/:invoiceNo", async (req, res) => {
             dc_date,
             order_no,
             order_date,
-            payment_terms,
             dispatch_through,
             discount,
             transport,
@@ -225,7 +222,7 @@ router.put("/update/:invoiceNo", async (req, res) => {
         await db.promise().query(
             `UPDATE performance_invoice2_header SET
              customer_name=?, invoice_no=?, invoice_date=?, dc_no=?, dc_date=?,
-             order_no=?, order_date=?, payment_terms=?, dispatch_through=?,
+             order_no=?, order_date=?, dispatch_through=?,
              discount=?, transport=?, subtotal=?, ordertype=?,
              cgst=?, sgst=?, igst=?, round_off=?, grandtotal=?
              WHERE id=?`,
@@ -233,7 +230,7 @@ router.put("/update/:invoiceNo", async (req, res) => {
                 customer_name, invoice_no, invoice_date,
                 dc_no || null, dc_date || null,
                 order_no || null, order_date || null,
-                payment_terms || null, dispatch_through || null,
+                dispatch_through || null,
                 discount || 0, transport || 0, subtotal || 0, ordertype || null,
                 cgst || 0, sgst || 0, igst || 0, round_off || 0, grandtotal || 0,
                 invoiceId,

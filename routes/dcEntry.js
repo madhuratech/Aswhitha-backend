@@ -35,19 +35,24 @@ router.get("/next-dc-no", async (req, res) => {
   }
 });
 
-// Clients — only those who still have a pending (not completed) inward DC
+// Clients — only those who have at least one item with remaining qty > 0
 router.get("/clients", async (req, res) => {
   try {
     const [rows] = await db.promise().query(
       `SELECT DISTINCT ie.supplier_name AS customer_name
        FROM inward_entry ie
+       JOIN inward_items ii ON ii.inward_id = ie.id
        WHERE ie.dc_number IS NOT NULL AND ie.dc_number != ''
-       AND NOT EXISTS (
-           SELECT 1 FROM order_status os
-           WHERE os.order_no = ie.dc_number
-             AND os.dc_type = 'Service'
-             AND os.status = 'Completed'
-       )
+        AND (
+         ii.quantity - COALESCE((
+           SELECT SUM(sdi.quantity)
+           FROM service_dc_items sdi
+           JOIN service_dc_entries sde ON sde.id = sdi.service_dc_id
+           WHERE sdi.item_name = ii.item_name
+             AND sde.supplier_name = ie.supplier_name
+             AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ie.dc_number, ',%')
+         ), 0)
+       ) > 0
        ORDER BY ie.supplier_name ASC`
     );
     res.json(rows);
@@ -57,21 +62,26 @@ router.get("/clients", async (req, res) => {
   }
 });
 
-// Client search — only customers with a pending (not completed) inward DC
+// Client search — only customers with at least one item with remaining qty > 0
 router.get("/clients/search", async (req, res) => {
   try {
     const { q } = req.query;
     const [rows] = await db.promise().query(
       `SELECT DISTINCT ie.supplier_name AS customer_name
        FROM inward_entry ie
+       JOIN inward_items ii ON ii.inward_id = ie.id
        WHERE ie.supplier_name LIKE ?
        AND ie.dc_number IS NOT NULL AND ie.dc_number != ''
-       AND NOT EXISTS (
-           SELECT 1 FROM order_status os
-           WHERE os.order_no = ie.dc_number
-             AND os.dc_type = 'Service'
-             AND os.status = 'Completed'
-       )
+       AND (
+         ii.quantity - COALESCE((
+           SELECT SUM(sdi.quantity)
+           FROM service_dc_items sdi
+           JOIN service_dc_entries sde ON sde.id = sdi.service_dc_id
+           WHERE sdi.item_name = ii.item_name
+             AND sde.supplier_name = ie.supplier_name
+             AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ie.dc_number, ',%')
+         ), 0)
+       ) > 0
        ORDER BY ie.supplier_name ASC LIMIT 20`,
       [`%${q || ""}%`]
     );
@@ -82,23 +92,28 @@ router.get("/clients/search", async (req, res) => {
   }
 });
 
-// Client DC numbers from inward_entry filtered by client name — only pending (not completed)
+// Client DC numbers — only those where at least one item still has remaining qty > 0
 router.get("/client-dc-list", async (req, res) => {
   try {
     const { client, q } = req.query;
-    let query = `SELECT ie.dc_number, ie.dc_date 
+    let query = `SELECT ie.dc_number, ie.dc_date
     FROM inward_entry ie
+    JOIN inward_items ii ON ii.inward_id = ie.id
     WHERE ie.dc_number IS NOT NULL AND ie.dc_number != ''
-    AND NOT EXISTS (
-      SELECT 1 FROM order_status os
-      WHERE os.order_no = ie.dc_number
-        AND os.dc_type = 'Service'
-        AND os.status = 'Completed'
-    )`;
+    AND (
+      ii.quantity - COALESCE((
+        SELECT SUM(sdi.quantity)
+        FROM service_dc_items sdi
+        JOIN service_dc_entries sde ON sde.id = sdi.service_dc_id
+        WHERE sdi.item_name = ii.item_name
+          AND sde.supplier_name = ie.supplier_name
+          AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ie.dc_number, ',%')
+      ), 0)
+    ) > 0`;
     const params = [];
-    if (client) { query += " AND supplier_name = ?"; params.push(client); }
-    if (q) { query += " AND dc_number LIKE ?"; params.push(`%${q}%`); }
-    query += " ORDER BY id DESC LIMIT 20";
+    if (client) { query += " AND ie.supplier_name = ?"; params.push(client); }
+    if (q) { query += " AND ie.dc_number LIKE ?"; params.push(`%${q}%`); }
+    query += " GROUP BY ie.dc_number, ie.dc_date, ie.id ORDER BY ie.id DESC LIMIT 20";
     const [rows] = await db.promise().query(query, params);
     res.json(rows);
   } catch (error) {
@@ -162,11 +177,12 @@ router.get("/inward/:dc_number", async (req, res) => {
   try {
 
     const { dc_number } = req.params;
+    const { supplier } = req.query;
 
     const [rows] = await db.promise().query(
       `SELECT supplier_name, dc_number, dc_date
-       FROM inward_entry WHERE dc_number = ?`,
-      [dc_number]
+       FROM inward_entry WHERE dc_number = ? AND supplier_name = ?`,
+      [dc_number, supplier]
     );
 
     if (!rows.length) {
@@ -176,10 +192,21 @@ router.get("/inward/:dc_number", async (req, res) => {
     const entry = rows[0];
 
     const [items] = await db.promise().query(
-      `SELECT item_name, hsn, quantity, unit, pcb_sl_no, problems, remarks
-       FROM inward_items
-       WHERE inward_id = (SELECT id FROM inward_entry WHERE dc_number = ?)`,
-      [dc_number]
+      `SELECT
+         ii.item_name, ii.hsn, ii.unit, ii.pcb_sl_no, ii.problems, ii.remarks,
+         (ii.quantity - COALESCE(SUM(sdi.quantity), 0)) AS quantity
+       FROM inward_items ii
+       JOIN inward_entry ie ON ie.id = ii.inward_id AND ie.dc_number = ? AND ie.supplier_name = ?
+       LEFT JOIN service_dc_items sdi
+         ON sdi.item_name = ii.item_name
+         AND sdi.service_dc_id IN (
+           SELECT sde.id FROM service_dc_entries sde
+           WHERE sde.supplier_name = ie.supplier_name
+             AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ie.dc_number, ',%')
+         )
+       GROUP BY ii.id, ii.item_name, ii.hsn, ii.unit, ii.pcb_sl_no, ii.problems, ii.remarks
+       HAVING quantity > 0`,
+      [dc_number, supplier]
     );
 
     res.json({
@@ -238,6 +265,8 @@ router.post("/createdc", async (req, res) => {
       const newDcEntryId = result.insertId;
 
       for (const item of items) {
+        const itemPartyDcNo = item.party_dc_no || s.party_dc_no || "";
+        const itemPartyDcDate = item.party_dc_date || s.party_dc_date || "";
         await conn.query(
           `INSERT INTO service_dc_items
           (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date)
@@ -250,8 +279,8 @@ router.post("/createdc", async (req, res) => {
             emptyToNull(item.uom),
             emptyToNull(item.hsn),
             emptyToNull(item.remarks),
-            emptyToNull(item.party_dc_no),
-            emptyToNull(item.party_dc_date)
+            emptyToNull(itemPartyDcNo),
+            emptyToNull(itemPartyDcDate)
           ]
         );
       }
@@ -270,15 +299,36 @@ router.post("/createdc", async (req, res) => {
         }
       } catch (_) {}
 
+      // Only mark order as Completed when all inward qty has been serviced (pending qty = 0)
       try {
-        const allOrderNos = (s.party_dc_no || "").split(",").map(s => s.trim()).filter(Boolean);
-        for (const orderNo of allOrderNos) {
-          await db.promise().query(
-            `INSERT INTO order_status (customer_name, order_no, dc_type, status)
-             VALUES (?, ?, 'Service', 'Completed')
-             ON DUPLICATE KEY UPDATE status = 'Completed'`,
-            [s.supplier_name, orderNo]
+        const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
+        if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
+        for (const pdcNo of uniquePartyDcNos) {
+          const [[inwardRow]] = await db.promise().query(
+            `SELECT COALESCE(SUM(ii.quantity), 0) AS total_qty
+             FROM inward_entry ie
+             JOIN inward_items ii ON ii.inward_id = ie.id
+             WHERE ie.dc_number = ? AND ie.supplier_name = ?`,
+            [pdcNo, s.supplier_name]
           );
+          const [[servicedRow]] = await db.promise().query(
+            `SELECT COALESCE(SUM(sdi.quantity), 0) AS total_qty
+             FROM service_dc_items sdi
+             JOIN service_dc_entries sde ON sde.id = sdi.service_dc_id
+             WHERE sde.supplier_name = ?
+               AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ?, ',%')`,
+            [s.supplier_name, pdcNo]
+          );
+          const inwardQty = Number(inwardRow?.total_qty || 0);
+          const servicedQty = Number(servicedRow?.total_qty || 0);
+          if (inwardQty > 0 && servicedQty >= inwardQty) {
+            await db.promise().query(
+              `INSERT INTO order_status (customer_name, order_no, dc_type, status)
+               VALUES (?, ?, 'Service', 'Completed')
+               ON DUPLICATE KEY UPDATE status = 'Completed'`,
+              [s.supplier_name, pdcNo]
+            );
+          }
         }
       } catch (_) {}
 
@@ -335,9 +385,11 @@ router.put("/updatedc/:id", async (req, res) => {
 
       // Insert updated items
       for (const item of items) {
+        const itemPartyDcNo = item.party_dc_no || s.party_dc_no || "";
+        const itemPartyDcDate = item.party_dc_date || s.party_dc_date || "";
         await conn.query(
           "INSERT INTO service_dc_items (service_dc_id, item_name, quantity, serial_no, uom, hsn, remarks, party_dc_no, party_dc_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [dcId, emptyToNull(item.item_name), toNum(item.quantity, null), emptyToNull(item.serial_no), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks), emptyToNull(item.party_dc_no), emptyToNull(item.party_dc_date)]
+          [dcId, emptyToNull(item.item_name), toNum(item.quantity, null), emptyToNull(item.serial_no), emptyToNull(item.uom), emptyToNull(item.hsn), emptyToNull(item.remarks), emptyToNull(itemPartyDcNo), emptyToNull(itemPartyDcDate)]
         );
       }
 
@@ -352,15 +404,43 @@ router.put("/updatedc/:id", async (req, res) => {
         }
       } catch (_) {}
 
+      // Only mark order as Completed when all inward qty has been serviced (pending qty = 0)
       try {
-        const allOrderNos = (s.party_dc_no || "").split(",").map(s => s.trim()).filter(Boolean);
-        for (const orderNo of allOrderNos) {
-          await db.promise().query(
-            `INSERT INTO order_status (customer_name, order_no, dc_type, status)
-             VALUES (?, ?, 'Service', 'Completed')
-             ON DUPLICATE KEY UPDATE status = 'Completed'`,
-            [s.supplier_name, orderNo]
+        const uniquePartyDcNos = [...new Set(items.map(i => i.party_dc_no).filter(Boolean))];
+        if (!uniquePartyDcNos.length && s.party_dc_no) uniquePartyDcNos.push(s.party_dc_no);
+        for (const pdcNo of uniquePartyDcNos) {
+          const [[inwardRow]] = await db.promise().query(
+            `SELECT COALESCE(SUM(ii.quantity), 0) AS total_qty
+             FROM inward_entry ie
+             JOIN inward_items ii ON ii.inward_id = ie.id
+             WHERE ie.dc_number = ? AND ie.supplier_name = ?`,
+            [pdcNo, s.supplier_name]
           );
+          const [[servicedRow]] = await db.promise().query(
+            `SELECT COALESCE(SUM(sdi.quantity), 0) AS total_qty
+             FROM service_dc_items sdi
+             JOIN service_dc_entries sde ON sde.id = sdi.service_dc_id
+             WHERE sde.supplier_name = ?
+               AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ?, ',%')`,
+            [s.supplier_name, pdcNo]
+          );
+          const inwardQty = Number(inwardRow?.total_qty || 0);
+          const servicedQty = Number(servicedRow?.total_qty || 0);
+          if (inwardQty > 0 && servicedQty >= inwardQty) {
+            await db.promise().query(
+              `INSERT INTO order_status (customer_name, order_no, dc_type, status)
+               VALUES (?, ?, 'Service', 'Completed')
+               ON DUPLICATE KEY UPDATE status = 'Completed'`,
+              [s.supplier_name, pdcNo]
+            );
+          } else {
+            // Pending qty still remains — remove any stale Completed status
+            await db.promise().query(
+              `DELETE FROM order_status
+               WHERE customer_name = ? AND order_no = ? AND dc_type = 'Service'`,
+              [s.supplier_name, pdcNo]
+            );
+          }
         }
       } catch (_) {}
 
@@ -557,7 +637,7 @@ router.delete("/deletedc/:inward_dc_no", async (req, res) => {
     const { inward_dc_no } = req.params;
 
     const [rows] = await db.promise().query(
-      "SELECT id FROM service_dc_entries WHERE inward_dc_no = ?",
+      "SELECT id, supplier_name, party_dc_no FROM service_dc_entries WHERE inward_dc_no = ?",
       [inward_dc_no]
     );
 
@@ -569,7 +649,8 @@ router.delete("/deletedc/:inward_dc_no", async (req, res) => {
 
     }
 
-    const dcEntryId = rows[0].id;
+    const dcEntry = rows[0];
+    const dcEntryId = dcEntry.id;
 
     // Delete items
     await db.promise().query(
@@ -582,6 +663,44 @@ router.delete("/deletedc/:inward_dc_no", async (req, res) => {
       "DELETE FROM service_dc_entries WHERE id = ?",
       [dcEntryId]
     );
+
+    // Clean up order_status: recalculate pending qty for each affected order
+    try {
+      const orderNos = (dcEntry.party_dc_no || "").split(",").map(s => s.trim()).filter(Boolean);
+      for (const orderNo of orderNos) {
+        const [[inwardRow]] = await db.promise().query(
+          `SELECT COALESCE(SUM(ii.quantity), 0) AS total_qty
+           FROM inward_entry ie
+           JOIN inward_items ii ON ii.inward_id = ie.id
+           WHERE ie.dc_number = ? AND ie.supplier_name = ?`,
+          [orderNo, dcEntry.supplier_name]
+        );
+        const [[servicedRow]] = await db.promise().query(
+          `SELECT COALESCE(SUM(sdi.quantity), 0) AS total_qty
+           FROM service_dc_items sdi
+           JOIN service_dc_entries sde ON sde.id = sdi.service_dc_id
+           WHERE sde.supplier_name = ?
+             AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ?, ',%')`,
+          [dcEntry.supplier_name, orderNo]
+        );
+        const inwardQty = Number(inwardRow?.total_qty || 0);
+        const servicedQty = Number(servicedRow?.total_qty || 0);
+        if (inwardQty > 0 && servicedQty >= inwardQty) {
+          await db.promise().query(
+            `INSERT INTO order_status (customer_name, order_no, dc_type, status)
+             VALUES (?, ?, 'Service', 'Completed')
+             ON DUPLICATE KEY UPDATE status = 'Completed'`,
+            [dcEntry.supplier_name, orderNo]
+          );
+        } else {
+          await db.promise().query(
+            `DELETE FROM order_status
+             WHERE customer_name = ? AND order_no = ? AND dc_type = 'Service'`,
+            [dcEntry.supplier_name, orderNo]
+          );
+        }
+      }
+    } catch (_) {}
 
     res.json({
       message: "DC Entry deleted successfully"

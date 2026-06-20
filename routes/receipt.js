@@ -17,10 +17,11 @@ const db = require("../config/database");
       }
     }
   }
-  // Also add payment_mode and remarks to receipt_items if not present
   const receiptItemsExtra = [
     { name: "payment_mode", type: "VARCHAR(100)" },
-    { name: "remarks", type: "VARCHAR(255)" }
+    { name: "remarks", type: "VARCHAR(255)" },
+    { name: "tds_amt", type: "DECIMAL(15,2) DEFAULT 0.00" },
+    { name: "advance_paid", type: "DECIMAL(15,2) DEFAULT 0.00" }
   ];
   for (const col of receiptItemsExtra) {
     try {
@@ -189,10 +190,11 @@ router.post("/new", async (req, res) => {
 
     for (const item of items) {
       await db.promise().query(
-        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks, tds_amt, advance_paid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [receiptId, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance,
-          item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
+          item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '',
+          item.tds_amt || 0, item.advance_paid || 0]
       );
     }
 
@@ -233,10 +235,11 @@ router.put("/update/:id", async (req, res) => {
 
     for (const item of items) {
       await db.promise().query(
-        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks, tds_amt, advance_paid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance,
-          item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '']
+          item.payment_mode || header_payment_mode, item.bank_name || header_bank_name, item.reference_number || header_reference_number, item.remarks || remarks || '',
+          item.tds_amt || 0, item.advance_paid || 0]
       );
     }
 
@@ -675,9 +678,15 @@ router.get("/report/vouchers", async (req, res) => {
         r.id, r.receipt_no, r.receipt_date, r.customer_name,
         r.payment_mode, r.bank_name, r.reference_number, r.total, r.grand_total,
         r.other_deductions, r.force_amount, r.remarks,
-        nc.address, nc.gst_number, nc.phone,
-        ri.id AS item_id, ri.bill_no, ri.bill_date,
-        ri.bill_amount, ri.paid_amount, ri.balance,
+        nc.address, nc.gst_number, nc.phone, nc.state, nc.pincode,
+        ri.id AS item_id, ri.bill_no,
+        COALESCE(
+          ri.bill_date,
+          (SELECT invoice_date FROM salesinvoice WHERE invoice_no = ri.bill_no LIMIT 1),
+          (SELECT invoice_date FROM service_invoices WHERE invoice_no = ri.bill_no LIMIT 1),
+          (SELECT invoice_date FROM directinvoice WHERE invoice_no = ri.bill_no LIMIT 1)
+        ) AS bill_date,
+        ri.bill_amount, ri.paid_amount, ri.balance, ri.tds_amt, ri.advance_paid,
         ri.payment_mode AS item_payment_mode, ri.bank_name AS item_bank_name, ri.reference_number AS item_reference_number, ri.remarks AS item_remarks
       FROM receipts r
       INNER JOIN receipt_items ri ON r.id = ri.receipt_id
@@ -745,6 +754,8 @@ router.get("/report/vouchers", async (req, res) => {
         bill_amount: row.bill_amount,
         paid_amount: row.paid_amount,
         balance: row.balance,
+        tds_amt: row.tds_amt,
+        advance_paid: row.advance_paid,
         payment_mode: row.item_payment_mode,
         bank_name: row.item_bank_name,
         reference_number: row.item_reference_number,
@@ -772,7 +783,14 @@ router.get("/:receipt_no", async (req, res) => {
     if (!rows.length) return res.status(404).json({ message: "Receipt not found" });
     const receipt = rows[0];
     const [items] = await db.promise().query(
-      `SELECT ri.*,
+      `SELECT ri.id, ri.receipt_id, ri.bill_no,
+        COALESCE(
+          ri.bill_date,
+          (SELECT invoice_date FROM salesinvoice WHERE invoice_no = ri.bill_no LIMIT 1),
+          (SELECT invoice_date FROM service_invoices WHERE invoice_no = ri.bill_no LIMIT 1),
+          (SELECT invoice_date FROM directinvoice WHERE invoice_no = ri.bill_no LIMIT 1)
+        ) AS bill_date,
+        ri.bill_amount, ri.paid_amount, ri.balance, ri.payment_mode, ri.bank_name, ri.reference_number, ri.remarks, ri.tds_amt, ri.advance_paid,
         (
           COALESCE((SELECT SUM(ri2.paid_amount) FROM receipt_items ri2 WHERE ri2.bill_no = ri.bill_no AND ri2.receipt_id != ri.receipt_id), 0)
           + COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = ri.bill_no), 0)

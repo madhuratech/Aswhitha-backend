@@ -15,28 +15,6 @@ const axios = require("axios");
   }
 })();
 
-// Auto Gentrate Bill No
-
-async function generateBillNo(){
-    const [rows] = await db.promise().query(
-        "SELECT MAX(id) AS lastId FROM purchase_entry"
-    );
-    const nextId = (rows[0].lastId || 0) + 1;
-    return `BILL-${String(nextId).padStart(3,"0")}`;
-}
-
-// Get Bill No
-router.get("/nextbillno", async(req,res) => {
- try{
-    const billNo = await generateBillNo();
-    res.json({bill_no: billNo});
- }catch(error){
-    console.log("ERROR Generating Bill No:",error);
-    res.status(500).json({message: error.message});
- }
-})
-
-
 // Bill No Search:
 
 router.get("/billno/search", async(req,res) => {
@@ -190,7 +168,6 @@ router.post("/new", async(req,res) =>{
     if (!despatch?.trim()) {
         return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
-     const billNumber = await generateBillNo();
      const [result] = await db.promise().query(
         "INSERT INTO purchase_entry (supplier_name, bill_no, bill_date, order_no, order_date, other_name, despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [supplier_name, bill_no, bill_date, order_no, order_date, other_name,  despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total]
@@ -205,7 +182,7 @@ router.post("/new", async(req,res) =>{
             [purchaseId, item.item_name, item.price, item.quantity, item.hsn, item.uom, amount, item.serial_no || null]
         );
     }
-    res.status(201).json({message: "Purchase Entry Created Successfully", bill_no: billNumber});
+    res.status(201).json({message: "Purchase Entry Created Successfully", bill_no: req.body.bill_no});
     }catch(error){
     console.error("Error Creating Purchase Entry:", error);
     res.status(500).json({message: "Internal Server Error"})
@@ -439,3 +416,4 @@ router.get("/supplier/search", async (req, res) => {
 
 
 module.exports = router;
+

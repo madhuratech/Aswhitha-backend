@@ -33,12 +33,13 @@ router.get("/calculated", async (req, res) => {
             FROM inward_entry ie
             JOIN inward_items ii
                 ON ii.inward_id = ie.id
-            LEFT JOIN service_dc_entries sde
-                ON  sde.supplier_name = ie.supplier_name
-                AND sde.party_dc_no   = ie.dc_number
             LEFT JOIN service_dc_items sdi
-                ON  sdi.service_dc_id = sde.id
-                AND sdi.item_name     = ii.item_name
+                ON  sdi.item_name    = ii.item_name
+                AND sdi.service_dc_id IN (
+                    SELECT sde.id FROM service_dc_entries sde
+                    WHERE sde.supplier_name = ie.supplier_name
+                      AND CONCAT(',', sde.party_dc_no, ',') LIKE CONCAT('%,', ie.dc_number, ',%')
+                )
             GROUP BY ie.id, ii.id
             HAVING pending_qty > 0
             ORDER BY ie.id DESC

@@ -10,7 +10,7 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
   try {
     await db.promise().query(
       "ALTER TABLE purchase_order_items ADD COLUMN serial_no VARCHAR(255) NULL"
-    ).catch(() => {});
+    ).catch(() => { });
     console.log("purchase_order_items table migrated successfully");
   } catch (err) {
     console.error("Error migrating purchase_order_items table:", err.message);
@@ -25,8 +25,6 @@ async function generatePONumber() {
   );
 
   const nextId = (rows[0].lastId || 0) + 1;
-  const year = new Date().getFullYear();
-
   return `PO-${year}-${String(nextId).padStart(3, "0")}`;
 }
 
@@ -334,7 +332,7 @@ router.get("/report/filters", async (req, res) => {
       values.push(poNumber);
     }
 
-    if(clientName){
+    if (clientName) {
       query += " AND po.client_name = ?";
       values.push(clientName);
     }
@@ -353,7 +351,7 @@ router.get("/report/filters", async (req, res) => {
 
 router.get("/report/excel", async (req, res) => {
   try {
-    const { fromDate, toDate, poNumber,clientName } = req.query;
+    const { fromDate, toDate, poNumber, clientName } = req.query;
 
     let query = `
       SELECT 
@@ -388,7 +386,7 @@ router.get("/report/excel", async (req, res) => {
       values.push(poNumber);
     }
 
-    if(clientName){
+    if (clientName) {
       query += "AND po.client_name = ?";
       values.push(clientName);
     }

@@ -27,7 +27,8 @@ router.get("/clients", async (req, res) => {
       `SELECT DISTINCT supplier_name AS customer_name
        FROM service_dc_entries sde
        WHERE NOT EXISTS (
-           SELECT 1 FROM service_invoices si WHERE si.dc_no = sde.inward_dc_no
+           SELECT 1 FROM service_invoices si
+           WHERE FIND_IN_SET(sde.inward_dc_no, REPLACE(si.dc_no, ' ', '')) > 0
        )
        AND EXISTS (
            SELECT 1 FROM service_dc_items sdi
@@ -66,15 +67,16 @@ router.get("/clients/search", async (req, res) => {
        FROM service_dc_entries sde
        LEFT JOIN newclient nc ON nc.customer_name = sde.supplier_name
        WHERE sde.supplier_name LIKE ?
-       AND NOT EXISTS (
-           SELECT 1 FROM service_invoices si WHERE si.dc_no = sde.inward_dc_no
-       )
-       AND EXISTS (
-           SELECT 1 FROM service_dc_items sdi
-           WHERE sdi.service_dc_id = sde.id
-           AND sdi.remarks IN ('Serviced', 'For Sale')
-       )
-       ORDER BY sde.supplier_name ASC`,
+        AND NOT EXISTS (
+            SELECT 1 FROM service_invoices si
+            WHERE FIND_IN_SET(sde.inward_dc_no, REPLACE(si.dc_no, ' ', '')) > 0
+        )
+        AND EXISTS (
+            SELECT 1 FROM service_dc_items sdi
+            WHERE sdi.service_dc_id = sde.id
+            AND sdi.remarks IN ('Serviced', 'For Sale')
+        )
+        ORDER BY sde.supplier_name ASC`,
 
       [`%${q}%`]
 
@@ -107,7 +109,7 @@ router.get("/service-dc/search", async (req, res) => {
     try {
       const [allDcs] = await db.promise().query(`
         SELECT sde.inward_dc_no, sde.supplier_name, sde.id,
-               (SELECT COUNT(*) FROM service_invoices si WHERE si.dc_no = sde.inward_dc_no) AS invoice_count,
+               (SELECT COUNT(*) FROM service_invoices si WHERE FIND_IN_SET(sde.inward_dc_no, REPLACE(si.dc_no, ' ', '')) > 0) AS invoice_count,
                (SELECT GROUP_CONCAT(CONCAT(sdi.item_name, ':', sdi.remarks)) FROM service_dc_items sdi WHERE sdi.service_dc_id = sde.id) AS items_remarks
         FROM service_dc_entries sde
         ORDER BY sde.id DESC LIMIT 10
@@ -141,13 +143,11 @@ router.get("/service-dc/search", async (req, res) => {
       FROM service_dc_entries sde
       WHERE 1=1
 
-      -- Only non-invoiced DCs (via dc_status)
+      -- Only non-invoiced DCs (check service_invoices directly — consistent with clients endpoints)
       AND NOT EXISTS (
           SELECT 1
-          FROM dc_status ds
-          WHERE ds.dc_number = sde.inward_dc_no
-          AND ds.dc_type = 'ServiceDC'
-          AND ds.status = 'Completed'
+          FROM service_invoices si
+          WHERE FIND_IN_SET(sde.inward_dc_no, REPLACE(si.dc_no, ' ', '')) > 0
       )
 
       -- Only DCs with at least one invoice-eligible item (Serviced / For Sale)
@@ -204,7 +204,7 @@ router.get("/service-dc/by-admin/:adminDcNo", async (req, res) => {
 
     // Block lookup if DC is already invoiced
     const [alreadyInvoiced] = await db.promise().query(
-      `SELECT id FROM service_invoices WHERE dc_no = ? LIMIT 1`,
+      `SELECT id FROM service_invoices WHERE FIND_IN_SET(?, REPLACE(dc_no, ' ', '')) > 0 LIMIT 1`,
       [adminDcNo]
     );
     if (alreadyInvoiced.length) {
@@ -272,9 +272,9 @@ router.get("/service-dc/:dcNo", async (req, res) => {
       `SELECT *
        FROM service_dc_entries
        WHERE party_dc_no = ?
-       AND NOT EXISTS (
-           SELECT 1 FROM service_invoices si WHERE si.dc_no = service_dc_entries.inward_dc_no
-       )
+        AND NOT EXISTS (
+            SELECT 1 FROM service_invoices si WHERE FIND_IN_SET(service_dc_entries.inward_dc_no, REPLACE(si.dc_no, ' ', '')) > 0
+        )
        ORDER BY id DESC
        LIMIT 1`,
 
@@ -346,7 +346,7 @@ router.post("/create", async (req, res) => {
       // Prevent duplicate invoice for the same DC
       if (s.dc_no) {
         const [existing] = await db.promise().query(
-          `SELECT id FROM service_invoices WHERE dc_no = ? LIMIT 1`,
+          `SELECT id FROM service_invoices WHERE FIND_IN_SET(?, REPLACE(dc_no, ' ', '')) > 0 LIMIT 1`,
           [s.dc_no]
         );
         if (existing.length) {
@@ -358,8 +358,8 @@ router.post("/create", async (req, res) => {
         `INSERT INTO service_invoices
         (customer_name, invoice_no, invoice_date, order_no, order_date, dc_no, dc_date,
          dispatch_through, discount, cgst,
-         sgst, igst, transport, round_off, grand_total)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         sgst, igst, transport, round_off, grand_total, client_dc_no)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           s.customer_name,
           s.invoice_no,
@@ -375,7 +375,8 @@ router.post("/create", async (req, res) => {
           toNum(s.igst),
           toNum(s.transport),
           toNum(s.round_off),
-          toNum(s.grand_total)
+          toNum(s.grand_total),
+          emptyToNull(s.client_dc_no)
         ]
       );
 
@@ -551,15 +552,17 @@ router.put("/update/:invoice_no", async (req, res) => {
         await db.promise().query(
             `UPDATE service_invoices SET
                 customer_name=?, invoice_date=?, order_no=?, order_date=?, dc_no=?, dc_date=?,
-                  dispatch_through=?,
-                discount=?, cgst=?, sgst=?, igst=?, transport=?, round_off=?, grand_total=?
+                dispatch_through=?,
+                discount=?, cgst=?, sgst=?, igst=?, transport=?, round_off=?, grand_total=?,
+                client_dc_no=?
              WHERE invoice_no=?`,
             [
                 s.customer_name, emptyToNull(s.invoice_date), emptyToNull(s.order_no),
                 emptyToNull(s.order_date), emptyToNull(s.dc_no), emptyToNull(s.dc_date),
-                 emptyToNull(s.dispatch_through),
+                emptyToNull(s.dispatch_through),
                 toNum(s.discount), toNum(s.cgst), toNum(s.sgst), toNum(s.igst),
-                toNum(s.transport), toNum(s.round_off), toNum(s.grand_total), invoice_no
+                toNum(s.transport), toNum(s.round_off), toNum(s.grand_total),
+                emptyToNull(s.client_dc_no), invoice_no
             ]
         );
 
@@ -613,14 +616,25 @@ router.delete("/delete/:invoice_no", async (req, res) => {
     try {
         const { invoice_no } = req.params;
         const [existing] = await db.promise().query(
-            "SELECT id FROM service_invoices WHERE invoice_no = ?",
+            "SELECT id, dc_no FROM service_invoices WHERE invoice_no = ?",
             [invoice_no]
         );
         if (!existing.length) return res.status(404).json({ message: "Invoice Not Found" });
-        const invoiceId = existing[0].id;
+        const { id: invoiceId, dc_no } = existing[0];
 
         await db.promise().query("DELETE FROM service_invoice_items WHERE invoice_id = ?", [invoiceId]);
         await db.promise().query("DELETE FROM service_invoices WHERE id = ?", [invoiceId]);
+
+        // Clean up dc_status so the DC becomes available again in the dropdown
+        if (dc_no) {
+            const dcNos = dc_no.split(",").map(d => d.trim()).filter(Boolean);
+            for (const dcNo of dcNos) {
+                await db.promise().query(
+                    `DELETE FROM dc_status WHERE dc_number = ? AND dc_type = 'ServiceDC'`,
+                    [dcNo]
+                );
+            }
+        }
 
         res.json({ message: "Invoice Deleted" });
     } catch (error) {

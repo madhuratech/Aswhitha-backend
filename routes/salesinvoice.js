@@ -5,6 +5,18 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 
 const { generateNextInvoiceNo } = require("../helpers/invoiceNumber");
 
+// Self-migration: ensure serial_no column exists in salesinvoice_items
+(async () => {
+  try {
+    await db.promise().query(
+      "ALTER TABLE salesinvoice_items ADD COLUMN serial_no VARCHAR(255) NULL"
+    ).catch(() => {});
+    console.log("salesinvoice_items table migrated successfully");
+  } catch (err) {
+    console.error("Error migrating salesinvoice_items table:", err.message);
+  }
+})();
+
 // Get Bill No
 router.get("/next-In-billno", async (req, res) => {
     try {
@@ -38,7 +50,20 @@ router.get("/report/customers", async (req, res) => {
 router.get("/clients", async (req, res) => {
     try {
         const [rows] = await db.promise().query(
-            `SELECT DISTINCT customer_name FROM sales_dc_entries ORDER BY customer_name ASC`
+            `SELECT DISTINCT sde.customer_name
+             FROM sales_dc_entries sde
+             WHERE EXISTS (
+                 SELECT 1 FROM sales_dc_items sdi
+                 WHERE sdi.dc_id = sde.id
+                 AND sdi.remarks IN ('Serviced', 'For Sale')
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM dc_status ds
+                 WHERE ds.dc_number = sde.dc_no
+                 AND ds.dc_type = 'SalesDC'
+                 AND ds.status = 'Completed'
+             )
+             ORDER BY sde.customer_name ASC`
         );
         res.json(rows);
     } catch (error) {
@@ -47,7 +72,7 @@ router.get("/clients", async (req, res) => {
     }
 });
 
-// Get All clients Search — only those who have a Sales DC entry (includes state/gst_number for GST type detection)
+// Get All clients Search — only those who have a non-invoiced Sales DC entry
 router.get('/clients/search', async (req, res) => {
     const { q } = req.query;
     try {
@@ -56,6 +81,17 @@ router.get('/clients/search', async (req, res) => {
              FROM sales_dc_entries sde
              LEFT JOIN newclient nc ON nc.customer_name = sde.customer_name
              WHERE sde.customer_name LIKE ?
+             AND EXISTS (
+                 SELECT 1 FROM sales_dc_items sdi
+                 WHERE sdi.dc_id = sde.id
+                 AND sdi.remarks IN ('Serviced', 'For Sale')
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM dc_status ds
+                 WHERE ds.dc_number = sde.dc_no
+                 AND ds.dc_type = 'SalesDC'
+                 AND ds.status = 'Completed'
+             )
              ORDER BY sde.customer_name ASC`,
             [`%${q}%`]
         );
@@ -258,8 +294,8 @@ router.post('/new', async (req, res) => {
             const invoiceId = result.insertId;
 
             const itemSql = `INSERT INTO salesinvoice_items
-                   (invoice_id, item_name, price, quantity, uom, hsn_number, amount, order_no, order_date, dc_no, dc_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+                   (invoice_id, item_name, price, quantity, uom, hsn_number, amount, order_no, order_date, dc_no, dc_date, serial_no)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
             for (const item of items) {
                 const amount = toNum(item.price) * toNum(item.quantity);
@@ -274,7 +310,8 @@ router.post('/new', async (req, res) => {
                     emptyToNull(item.order_no),
                     emptyToNull(item.order_date),
                     emptyToNull(item.dc_no),
-                    emptyToNull(item.dc_date)
+                    emptyToNull(item.dc_date),
+                    emptyToNull(item.serial_no || item.sl_no)
                 ]);
             }
 
@@ -352,7 +389,7 @@ router.put('/update/:invoiceNo', async (req, res) => {
 
         await conn.query("DELETE FROM salesinvoice_items WHERE invoice_id=?", [invoiceId]);
 
-        const itemSql = "INSERT INTO salesinvoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount, order_no, order_date, dc_no, dc_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        const itemSql = "INSERT INTO salesinvoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount, order_no, order_date, dc_no, dc_date, serial_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         for (const item of items) {
             const amount = toNum(item.price) * toNum(item.quantity);
             await conn.query(itemSql, [
@@ -366,7 +403,8 @@ router.put('/update/:invoiceNo', async (req, res) => {
                 emptyToNull(item.order_no || item.client_dc_no),
                 emptyToNull(item.order_date || item.client_dc_date),
                 emptyToNull(item.dc_no),
-                emptyToNull(item.dc_date)
+                emptyToNull(item.dc_date),
+                emptyToNull(item.serial_no || item.sl_no)
             ]);
         }
 
@@ -508,7 +546,7 @@ router.get('/INV/search', async (req, res) => {
     const searchTerm = `%${q || ""}%`;
     try {
         const [rows] = await db.promise().query(
-            "SELECT invoice_no FROM salesinvoice WHERE invoice_no LIKE ?",
+            "SELECT invoice_no FROM salesinvoice WHERE invoice_no LIKE ? ORDER BY id DESC",
             [searchTerm]
         );
         res.json(rows);
@@ -784,7 +822,7 @@ router.get("/view-report", async (req, res) => {
             FROM (
                 SELECT
                     s.invoice_no, s.invoice_date, s.customer_name,
-                    sii.item_name, NULL AS serial_number,
+                    sii.item_name, sii.serial_no AS serial_number,
                     sii.hsn_number, sii.quantity, sii.price,
                     (sii.quantity * sii.price) AS amount
                 FROM salesinvoice s

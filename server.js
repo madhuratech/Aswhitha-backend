@@ -3,6 +3,11 @@ const express = require("express");
 const cors = require("cors");
 const db = require("./config/database");
 
+// Migrate phone column to VARCHAR(100) for alphanumeric phone numbers
+db.promise().query(
+  "ALTER TABLE newclient MODIFY COLUMN phone VARCHAR(100) NULL"
+).catch(() => {});
+
 // Add client_dc_no column if not already present
 db.promise().query(
   "ALTER TABLE service_invoices ADD COLUMN client_dc_no VARCHAR(100) DEFAULT ''"
@@ -103,11 +108,11 @@ db.promise().query(
   "UPDATE salesinvoice SET dc_no = '1189, 1190' WHERE id = 12"
 ).catch(() => {});
 
-// ── Order Status Tracking Table ──────────────────────────────────────────────
+// -- Order Status Tracking Table ----------------------------------------------
 (async () => {
   try {
-    await db.promise().query(`
-      CREATE TABLE IF NOT EXISTS order_status (
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS order_status (
         id INT AUTO_INCREMENT PRIMARY KEY,
         customer_name VARCHAR(255) NOT NULL,
         order_no VARCHAR(100) NOT NULL,
@@ -116,16 +121,16 @@ db.promise().query(
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY unique_order (customer_name, order_no, dc_type)
-      )
-    `);
+      )`
+    );
 
     // Seed: mark all existing inward_entry dc_numbers as Pending (if not tracked)
-    await db.promise().query(`
-      INSERT IGNORE INTO order_status (customer_name, order_no, dc_type, status)
+    await db.promise().query(
+      `INSERT IGNORE INTO order_status (customer_name, order_no, dc_type, status)
       SELECT supplier_name, dc_number, 'Service', 'Pending'
       FROM inward_entry
-      WHERE dc_number IS NOT NULL AND dc_number != ''
-    `);
+      WHERE dc_number IS NOT NULL AND dc_number != ''`
+    );
 
     // Seed: mark all existing Service DC order numbers as Completed
     const [dcRows] = await db.promise().query(
@@ -147,11 +152,11 @@ db.promise().query(
   }
 })();
 
-// ── DC Status Tracking Table ──────────────────────────────────────────────────
+// -- DC Status Tracking Table --------------------------------------------------
 (async () => {
   try {
-    await db.promise().query(`
-      CREATE TABLE IF NOT EXISTS dc_status (
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS dc_status (
         id INT AUTO_INCREMENT PRIMARY KEY,
         dc_number VARCHAR(255) NOT NULL,
         dc_type VARCHAR(50) NOT NULL,
@@ -160,24 +165,24 @@ db.promise().query(
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY unique_dc (dc_number, dc_type)
-      )
-    `);
+      )`
+    );
 
     // Seed all existing Sales DC numbers as Pending
-    await db.promise().query(`
-      INSERT IGNORE INTO dc_status (dc_number, dc_type, status)
+    await db.promise().query(
+      `INSERT IGNORE INTO dc_status (dc_number, dc_type, status)
       SELECT dc_no, 'SalesDC', 'Pending'
       FROM sales_dc_entries
-      WHERE dc_no IS NOT NULL AND dc_no != ''
-    `);
+      WHERE dc_no IS NOT NULL AND dc_no != ''`
+    );
 
     // Seed all existing Service DC numbers as Pending
-    await db.promise().query(`
-      INSERT IGNORE INTO dc_status (dc_number, dc_type, status)
+    await db.promise().query(
+      `INSERT IGNORE INTO dc_status (dc_number, dc_type, status)
       SELECT inward_dc_no, 'ServiceDC', 'Pending'
       FROM service_dc_entries
-      WHERE inward_dc_no IS NOT NULL AND inward_dc_no != ''
-    `);
+      WHERE inward_dc_no IS NOT NULL AND inward_dc_no != ''`
+    );
 
     // Seed: mark DCs already used in Sales Invoices as Completed
     const [salesInvDcs] = await db.promise().query(
@@ -231,11 +236,11 @@ db.promise().query(
   }
 })();
 
-// ── Performance Invoice Tables ────────────────────────────────────────────────
+// -- Performance Invoice Tables -----------------------------------------------
 (async () => {
   try {
-    await db.promise().query(`
-      CREATE TABLE IF NOT EXISTS performance_invoice_header (
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS performance_invoice_header (
         id INT AUTO_INCREMENT PRIMARY KEY,
         customer_name VARCHAR(255),
         invoice_no VARCHAR(100) UNIQUE,
@@ -257,10 +262,10 @@ db.promise().query(
         grandtotal DECIMAL(10,2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-    await db.promise().query(`
-      CREATE TABLE IF NOT EXISTS performance_invoice_items (
+      )`
+    );
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS performance_invoice_items (
         id INT AUTO_INCREMENT PRIMARY KEY,
         invoice_id INT,
         item_name VARCHAR(255),
@@ -271,19 +276,19 @@ db.promise().query(
         hsn_number VARCHAR(50),
         amount DECIMAL(10,2),
         FOREIGN KEY (invoice_id) REFERENCES performance_invoice_header(id) ON DELETE CASCADE
-      )
-    `);
+      )`
+    );
     console.log("Performance Invoice tables ready");
   } catch (e) {
     console.error("Performance Invoice table migration error:", e.message);
   }
 })();
 
-// ── Performance Invoice 2 Tables ─────────────────────────────────────────────
+// -- Performance Invoice 2 Tables ---------------------------------------------
 (async () => {
   try {
-    await db.promise().query(`
-      CREATE TABLE IF NOT EXISTS performance_invoice2_header (
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS performance_invoice2_header (
         id INT AUTO_INCREMENT PRIMARY KEY,
         customer_name VARCHAR(255),
         invoice_no VARCHAR(100) UNIQUE,
@@ -305,10 +310,10 @@ db.promise().query(
         grandtotal DECIMAL(10,2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-    await db.promise().query(`
-      CREATE TABLE IF NOT EXISTS performance_invoice2_items (
+      )`
+    );
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS performance_invoice2_items (
         id INT AUTO_INCREMENT PRIMARY KEY,
         invoice_id INT,
         item_name VARCHAR(255),
@@ -319,24 +324,24 @@ db.promise().query(
         hsn_number VARCHAR(50),
         amount DECIMAL(10,2),
         FOREIGN KEY (invoice_id) REFERENCES performance_invoice2_header(id) ON DELETE CASCADE
-      )
-    `);
+      )`
+    );
     console.log("Performance Invoice 2 tables ready");
   } catch (e) {
     console.error("Performance Invoice 2 table migration error:", e.message);
   }
 })();
 
-// ── DC Running Number Counter ──────────────────────────────────────────────────
+// -- DC Running Number Counter ------------------------------------------------
 (async () => {
   try {
-    await db.promise().query(`
-      CREATE TABLE IF NOT EXISTS dc_running_number (
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS dc_running_number (
         id INT PRIMARY KEY DEFAULT 1,
         current_number INT NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
+      )`
+    );
     const [rows] = await db.promise().query("SELECT COUNT(*) AS cnt FROM dc_running_number");
     if (rows[0].cnt === 0) {
       const [salesRows] = await db.promise().query("SELECT dc_no FROM sales_dc_entries");
