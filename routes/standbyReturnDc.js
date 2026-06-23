@@ -180,6 +180,9 @@ router.post("/createdc", async (req, res) => {
     res.status(201).json({ message: "Standby Return DC created successfully", return_dc_no: s.return_dc_no });
   } catch (error) {
     console.error("Error creating Standby Return DC:", error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: `Return DC No '${s.return_dc_no}' already exists. Please use a different number.` });
+    }
     res.status(500).json({ message: "Internal Server Error" });
   }
 });

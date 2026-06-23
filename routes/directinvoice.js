@@ -1,7 +1,9 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const axios = require("axios");
+
+
 
 // Self-migration: ensure serial_no column exists in invoice_items
 (async () => {
@@ -47,7 +49,7 @@ router.get('/clients/search', async(req,res) =>{
     try{
         const [rows] = await db.promise().query(
             "SELECT id, customer_name, state, gst_number FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
-            [`%${q}%`]
+            ["%" + q + "%"]
         );
         res.json(rows);
     }catch(error){
@@ -61,7 +63,7 @@ router.get('/clients/search', async(req,res) =>{
 router.get('/items/search', async(req,res) =>{
     const {q, type} = req.query;
     let query = "";
-    let values = [`%${q || ""}%`];
+    let values = ["%" + (q || "") + "%"];
 
     if(type === "service"){
         query = "SELECT service_name AS item_name, hsn_number From servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
@@ -139,7 +141,8 @@ router.post('/new', async (req, res) => {
             sgst,
             igst,
             round_off,
-            grandtotal
+            grandtotal,
+            gst_rate,
         } = req.body;
 
         if (!dispatch_through?.trim()) {
@@ -148,9 +151,7 @@ router.post('/new', async (req, res) => {
 
         try {
             const [result] = await db.promise().query(
-                `INSERT INTO directinvoice 
-                 (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, payment_terms, dispatch_through, discount, transport, subtotal, cgst, sgst, igst, round_off, grandtotal)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                "INSERT INTO directinvoice (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, payment_terms, dispatch_through, discount, transport, subtotal, cgst, sgst, igst, round_off, grandtotal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     customer_name,
                     invoice_no,
@@ -177,9 +178,7 @@ router.post('/new', async (req, res) => {
             for (const item of items) {
                 const amount = item.price * item.quantity;
                 await db.promise().query(
-                    `INSERT INTO invoice_items 
-                    (invoice_id, item_name, price, quantity, uom, hsn_number, amount, serial_no) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    "INSERT INTO invoice_items (invoice_id, item_name, price, quantity, uom, hsn_number, amount, serial_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         invoiceId,
                         item.item_name,
@@ -198,9 +197,7 @@ router.post('/new', async (req, res) => {
                 const dcNos = (dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
                 for (const dcNo of dcNos) {
                     await db.promise().query(
-                        `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
-                         VALUES (?, 'DirectDC', 'Completed', 'DirectInvoice')
-                         ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'DirectInvoice'`,
+                        "INSERT INTO dc_status (dc_number, dc_type, status, invoice_type) VALUES (?, 'DirectDC', 'Completed', 'DirectInvoice') ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'DirectInvoice'",
                         [dcNo]
                     );
                 }
@@ -243,7 +240,8 @@ router.put('/update/:invoiceNo', async(req, res) => {
             igst,
             round_off,
             grandtotal,
-            items
+            items,
+            gst_rate,
         } = req.body;
 
         if (!dispatch_through?.trim()) {
@@ -311,9 +309,7 @@ router.put('/update/:invoiceNo', async(req, res) => {
             const dcNos = (dc_no || "").split(",").map(d => d.trim()).filter(Boolean);
             for (const dcNo of dcNos) {
                 await db.promise().query(
-                    `INSERT INTO dc_status (dc_number, dc_type, status, invoice_type)
-                     VALUES (?, 'DirectDC', 'Completed', 'DirectInvoice')
-                     ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'DirectInvoice'`,
+                    "INSERT INTO dc_status (dc_number, dc_type, status, invoice_type) VALUES (?, 'DirectDC', 'Completed', 'DirectInvoice') ON DUPLICATE KEY UPDATE status = 'Completed', invoice_type = 'DirectInvoice'",
                     [dcNo]
                 );
             }
@@ -402,11 +398,7 @@ router.get('/edit/:invoiceNo', async (req, res) => {
 router.get('/report/all', async (req, res) => {
     try {
         const [rows] = await db.promise().query(
-            `SELECT d.*, COUNT(i.id) AS item_count
-             FROM directinvoice d
-             LEFT JOIN invoice_items i ON d.id = i.invoice_id
-             GROUP BY d.id
-             ORDER BY d.invoice_date DESC, d.id DESC`
+            "SELECT d.*, COUNT(i.id) AS item_count FROM directinvoice d LEFT JOIN invoice_items i ON d.id = i.invoice_id GROUP BY d.id ORDER BY d.invoice_date DESC, d.id DESC"
         );
         res.json(rows);
     } catch (error) {
@@ -418,7 +410,7 @@ router.get('/report/all', async (req, res) => {
 // invoicenumber search
 router.get('/INV/search', async(req,res) =>{
     const {q} = req.query;
-    const searchTerm = `%${q || ""}%`;
+    const searchTerm = "%" + (q || "") + "%";
     try{
         const [rows] = await db.promise().query(
             "SELECT invoice_no FROM directinvoice WHERE invoice_no LIKE ? ORDER BY id DESC",

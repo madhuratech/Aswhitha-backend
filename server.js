@@ -8,6 +8,16 @@ db.promise().query(
   "ALTER TABLE newclient MODIFY COLUMN phone VARCHAR(100) NULL"
 ).catch(() => {});
 
+// Add employee_name to expenses if not already present
+db.promise().query(
+  "ALTER TABLE expenses ADD COLUMN employee_name VARCHAR(255) DEFAULT NULL"
+).catch(() => {});
+
+// Add employee_id FK to expenses for proper join-based lookup
+db.promise().query(
+  "ALTER TABLE expenses ADD COLUMN employee_id INT DEFAULT NULL"
+).catch(() => {});
+
 // Add client_dc_no column if not already present
 db.promise().query(
   "ALTER TABLE service_invoices ADD COLUMN client_dc_no VARCHAR(100) DEFAULT ''"

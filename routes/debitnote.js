@@ -1,8 +1,9 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const axios = require("axios");
 const ExcelJS = require("exceljs");
+const { computeGst } = require("../utils/gstCalc");
 
 (async () => {
   try {
@@ -21,11 +22,8 @@ async function generateDNNumber() {
   const [rows] = await db.promise().query(
     "SELECT MAX(id) AS lastId FROM debit_notes"
   );
-
   const nextId = (rows[0].lastId || 0) + 1;
-  const year = new Date().getFullYear();
-
-  return `DN-${year}-${String(nextId).padStart(3, "0")}`;
+  return `DN-${String(nextId).padStart(4, "0")}`;
 }
 
 // Get Debitnot number
@@ -44,10 +42,10 @@ router.get("/getdnnumber", async (req, res) => {
 
 router.get("/clients/search",async(req,res) =>{
     const { q } = req.query;
-    const searchTerm = `%${q || ""}%`;
+    const searchTerm = "%" + (q || "") + "%";
     try{
         const[rows] = await db.promise().query(
-            "SELECT id, customer_name FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
+            "SELECT id, customer_name, state, gst_number FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
             [searchTerm]
         );
         res.json(rows);
@@ -62,7 +60,7 @@ router.get("/clients/search",async(req,res) =>{
 router.get("/clients", async (req, res) => {
   try {
     const [rows] = await db.promise().query(
-      "SELECT id, customer_name FROM newclient ORDER BY customer_name ASC"
+      "SELECT id, customer_name, state, gst_number FROM newclient ORDER BY customer_name ASC"
     );
     res.json(rows);
   } catch (error) {
@@ -75,16 +73,16 @@ router.get("/clients", async (req, res) => {
 router.get("/items/search", async (req, res) => {
   const { q, type } = req.query;
   let query = "";
-  let values = [`%${q || ""}%`];
+  let values = ["%" + (q || "") + "%"];
 
   if (type === "service") {
-    query = `SELECT service_name AS item_name, hsn_number FROM servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20 `;
+    query = "SELECT service_name AS item_name, hsn_number FROM servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
   }
   else if (type === "spare") {
-    query = `SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ? OR hsn_number LIKE ? LIMIT 20`;
+    query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
   }
   else if (type === "purchase_item") {
-    query = `SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ? OR hsn_number LIKE ? LIMIT 20`;
+    query = "SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
   }
   else {
     return res.status(400).json({ message: "Invalid item type" });
@@ -124,8 +122,8 @@ router.get("/items/type",async (req, res) => {
        
         res.json(rows);
     } catch (error) {
-        console.error(`Error fetching ${type} items:`, error);
-        res.status(500).json({ message: `${type} items fetch failed` });
+        console.error("Error fetching " + type + " items:", error);
+        res.status(500).json({ message: type + " items fetch failed" });
     }
 })
 
@@ -133,12 +131,26 @@ router.get("/items/type",async (req, res) => {
 
 router.post('/new',async(req,res)=>{
     try{
-        const{dn_number, client_name, dn_date , bill_no , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge, items}=req.body
+        const{dn_number, client_name, dn_date , bill_no , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge, items, gst_rate}=req.body
         const dnNumber = await generateDNNumber();
+
+        // Compute GST server-side for consistency
+        const [clientRows] = await db.promise().query(
+            "SELECT state, gst_number FROM newclient WHERE customer_name = ?",
+            [client_name]
+        );
+        const client = clientRows[0] || {};
+        const computed = computeGst({
+            subtotal: subtotal || 0,
+            transport: delivery_charge || 0,
+            gstRate: gst_rate || 18,
+            gstNumber: client.gst_number,
+            state: client.state,
+        });
 
         const[dnResult] = await db.promise().query(
             'INSERT INTO debit_notes(dn_number, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [dnNumber, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge || 0]
+            [dnNumber, client_name, dn_date || null, bill_no, bill_date || null, order_type, remarks, subtotal || 0, computed.cgst, computed.sgst, computed.igst, computed.grandTotal, delivery_charge || 0]
         );
         const dnID = dnResult.insertId;
 
@@ -149,12 +161,11 @@ router.post('/new',async(req,res)=>{
             const net = amount -(item.discount || 0);
 
             await db.promise().query(
-             `INSERT INTO debit_note_items(dn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount) 
-             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-             [dnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, item.part_no, item.unit, net]            
-  );
+             "INSERT INTO debit_note_items(dn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             [dnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, String(item.part_no ?? ""), item.unit, net]            
+   );
 }
-        res.status(201).json({message:'Debit note created successfully', dnNumber});
+         res.status(201).json({message:'Debit note created successfully', dnNumber});
      
     } catch(error){
         console.log("Error Creating debitnote order", error);
@@ -167,18 +178,31 @@ router.post('/new',async(req,res)=>{
 router.put("/:dnNumber",async(req,res) => {
 const {dnNumber} = req.params;
 try{
-  const{client_name, order_type, dn_date, items, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge, remarks} = req.body;
+  const{client_name, order_type, dn_date, bill_no, bill_date, items, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge, remarks, gst_rate} = req.body;
    const[dnRows] = await db.promise().query(
       "SELECT * FROM debit_notes WHERE dn_number = ?",
       [dnNumber]
     );
 
     const dnID = dnRows[0].id;
+
+    // Compute GST server-side for consistency
+    const [clientRows] = await db.promise().query(
+        "SELECT state, gst_number FROM newclient WHERE customer_name = ?",
+        [client_name]
+    );
+    const client = clientRows[0] || {};
+    const computed = computeGst({
+        subtotal: subtotal || 0,
+        transport: delivery_charge || 0,
+        gstRate: gst_rate || 18,
+        gstNumber: client.gst_number,
+        state: client.state,
+    });
+
    await db.promise().query(
-  `UPDATE debit_notes 
-   SET client_name=?, order_type=?, dn_date=?, subtotal=?, cgst=?, sgst=?, igst=?, roundOff=?, grandTotal=?, delivery_charge=?, remarks=? 
-   WHERE id=?`,
-  [client_name, order_type, dn_date, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge || 0, remarks, dnID]
+   "UPDATE debit_notes SET client_name=?, order_type=?, dn_date=?, bill_no=?, bill_date=?, subtotal=?, cgst=?, sgst=?, igst=?, roundOff=?, grandTotal=?, delivery_charge=?, remarks=? WHERE id=?",
+  [client_name, order_type, dn_date, bill_no, bill_date || null, subtotal || 0, computed.cgst, computed.sgst, computed.igst, computed.roundOff, computed.grandTotal, delivery_charge || 0, remarks, dnID]
 );
 
     // Delete existing items
@@ -192,14 +216,12 @@ try{
       const net = amount - (item.discount || 0);
 
       await db.promise().query(
-        `INSERT INTO debit_note_items
-        (dn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [dnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, item.part_no, item.unit, net]
+        "INSERT INTO debit_note_items (dn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [dnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, String(item.part_no ?? ""), item.unit, net]
       );
-      
-      res.status(500).json({message: "Internal Server Error"});
     }
+
+    res.json({message: "Debit note updated successfully", dnNumber});
 
 } catch(error){
   console.log("error Updating purchase Order:", error);
@@ -209,7 +231,7 @@ try{
 
 // Delete Dn Number
 
-router.delete(`/:dnNumber`, async(req, res) => {
+router.delete("/:dnNumber", async(req, res) => {
   try{
     const {dnNumber} = req.params;
     const[dnRows] = await db.promise().query(
@@ -229,9 +251,9 @@ router.delete(`/:dnNumber`, async(req, res) => {
 });
 
 // Dn Search
-router.get(`/dn/search`, async(req, res) => {
+router.get("/dn/search", async(req, res) => {
   const {q} = req.query;
-  const searchTerm = `%${q || ""}%`;
+  const searchTerm = "%" + (q || "") + "%";
   try{
     const[rows] = await db.promise().query(
       "SELECT dn_number FROM debit_notes WHERE dn_number LIKE ? ORDER BY id DESC LIMIT 20",
@@ -284,7 +306,7 @@ router.get("/full/:dnNumber", async(req,res) =>{
 
 // Get Debit notes order by dn number
 
-router.get(`/:dnNumber`, async(req,res) =>{
+router.get("/:dnNumber", async(req,res) =>{
   const {dnNumber} = req.params;
   try{
     const[rows] = await db.promise().query(
@@ -309,27 +331,7 @@ router.get(`/:dnNumber`, async(req,res) =>{
 router.get("/report/filters", async (req, res) => {
   try{
     const{fromDate, toDate, dnNumber} = req.query;
-    let query = `
-    SELECT 
-    dn.dn_number,
-    dn.dn_date,
-    dn.bill_date,
-    dn.bill_no,
-    dn.client_name,
-    dn.subtotal,
-    dn.cgst,
-    dn.sgst,
-    dn.igst,
-    dn.grandTotal,
-    dn.delivery_charge,
-    dni.item_name,
-    dni.quantity,
-    dni.price,
-    dni.discount
-    FROM debit_notes dn
-    LEFT JOIN debit_note_items dni ON dn.id = dni.dn_id
-    WHERE 1=1
-    `;
+    let query = "SELECT dn.dn_number, dn.dn_date, dn.bill_date, dn.bill_no, dn.client_name, dn.subtotal, dn.cgst, dn.sgst, dn.igst, dn.grandTotal, dn.delivery_charge, dni.item_name, dni.quantity, dni.price, dni.discount FROM debit_notes dn LEFT JOIN debit_note_items dni ON dn.id = dni.dn_id WHERE 1=1";
     let values = [];
     if (fromDate && toDate) {
     query += " AND dn.dn_date BETWEEN ? AND ?";
@@ -353,25 +355,7 @@ router.get("/report/filters", async (req, res) => {
 router.get("/report/excel",async(req,res) =>{
   try{
     const{fromDate, toDate, dnNumber} = req.query;
-    let query = `SELECT 
-    dn.dn_number,
-    dn.dn_date,
-    dn.bill_date,
-    dn.bill_no,
-    dn.client_name,
-    dn.subtotal,
-    dn.cgst,
-    dn.sgst,
-    dn.igst,
-    dn.grandTotal,
-    dn.delivery_charge,
-    dni.item_name,
-    dni.quantity,
-    dni.price,
-    dni.discount
-    FROM debit_notes dn
-    LEFT JOIN debit_note_items dni ON dn.id = dni.dn_id
-    WHERE 1=1`;
+    let query = "SELECT dn.dn_number, dn.dn_date, dn.bill_date, dn.bill_no, dn.client_name, dn.subtotal, dn.cgst, dn.sgst, dn.igst, dn.grandTotal, dn.delivery_charge, dni.item_name, dni.quantity, dni.price, dni.discount FROM debit_notes dn LEFT JOIN debit_note_items dni ON dn.id = dni.dn_id WHERE 1=1";
 
     let values = [];
     if (fromDate && toDate) {

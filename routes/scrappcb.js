@@ -81,6 +81,42 @@ router.get("/all", async (req, res) => {
   }
 });
 
+// Report endpoint with date and pcb_name filtering
+router.get("/report", async (req, res) => {
+  try {
+    const { fromDate, toDate, pcbName } = req.query;
+    let query = "SELECT * FROM scrap_pcb WHERE 1=1";
+    let values = [];
+    if (fromDate && toDate) {
+      query += " AND damage_date BETWEEN ? AND ?";
+      values.push(fromDate, toDate);
+    }
+    if (pcbName) {
+      query += " AND pcb_name = ?";
+      values.push(pcbName);
+    }
+    query += " ORDER BY id DESC";
+    const [rows] = await db.promise().query(query, values);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching scrap PCB report:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get distinct PCB names
+router.get("/pcb-names", async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT MIN(id) AS id, pcb_name FROM scrap_pcb WHERE pcb_name IS NOT NULL AND pcb_name != '' GROUP BY pcb_name ORDER BY pcb_name ASC"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching PCB names:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Get single entry details
 router.get("/:scrapNo", async (req, res) => {
   const { scrapNo } = req.params;

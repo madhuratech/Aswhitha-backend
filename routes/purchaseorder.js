@@ -25,7 +25,7 @@ async function generatePONumber() {
   );
 
   const nextId = (rows[0].lastId || 0) + 1;
-  return `PO-${year}-${String(nextId).padStart(3, "0")}`;
+  return `PO-${String(nextId).padStart(4, "0")}`;
 }
 
 

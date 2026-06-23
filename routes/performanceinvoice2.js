@@ -1,9 +1,11 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const { generateNextPI2InvoiceNo } = require("../helpers/pi2InvoiceNumber");
 
-// ── GET next PI2 invoice number ───────────────────────────────────────────────
+
+
+// -- GET next PI2 invoice number --
 router.get("/next-In-billno", async (req, res) => {
     try {
         const invoice_no = await generateNextPI2InvoiceNo();
@@ -14,7 +16,7 @@ router.get("/next-In-billno", async (req, res) => {
     }
 });
 
-// ── GET all clients ───────────────────────────────────────────────────────────
+// -- GET all clients --
 router.get("/clients", async (req, res) => {
     try {
         const [rows] = await db.promise().query(
@@ -27,13 +29,13 @@ router.get("/clients", async (req, res) => {
     }
 });
 
-// ── GET clients search ────────────────────────────────────────────────────────
+// -- GET clients search --
 router.get("/clients/search", async (req, res) => {
     const { q } = req.query;
     try {
         const [rows] = await db.promise().query(
             "SELECT id, customer_name, state, gst_number FROM newclient WHERE customer_name LIKE ? ORDER BY customer_name ASC LIMIT 20",
-            [`%${q}%`]
+            ["%" + (q || "") + "%"]
         );
         res.json(rows);
     } catch (error) {
@@ -42,7 +44,7 @@ router.get("/clients/search", async (req, res) => {
     }
 });
 
-// ── GET items by type (service/spare/purchase_item) ───────────────────────────
+// -- GET items by type (service/spare/purchase_item) --
 router.get("/items/:type", async (req, res) => {
     const type = req.params.type.toLowerCase();
     let query = "";
@@ -64,11 +66,11 @@ router.get("/items/:type", async (req, res) => {
     }
 });
 
-// ── GET items search ──────────────────────────────────────────────────────────
+// -- GET items search --
 router.get("/items/search", async (req, res) => {
     const { q, type } = req.query;
     let query = "";
-    const values = [`%${q || ""}%`];
+    const values = ["%" + (q || "") + "%"];
     if (type === "service") {
         query = "SELECT service_name AS item_name, hsn_number FROM servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20";
     } else if (type === "spare") {
@@ -87,7 +89,7 @@ router.get("/items/search", async (req, res) => {
     }
 });
 
-// ── POST create new Performance Invoice 2 ────────────────────────────────────
+// -- POST create new Performance Invoice 2 --
 router.post("/new", async (req, res) => {
     const items = Array.isArray(req.body.items) ? req.body.items : [];
     let attempts = 0;
@@ -113,6 +115,7 @@ router.post("/new", async (req, res) => {
             round_off,
             grandtotal,
             ordertype,
+            gst_rate,
         } = req.body;
 
         if (!dispatch_through?.trim()) {
@@ -121,11 +124,7 @@ router.post("/new", async (req, res) => {
 
         try {
             const [result] = await db.promise().query(
-                `INSERT INTO performance_invoice2_header
-                 (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date,
-                  dispatch_through, discount, transport, subtotal, ordertype,
-                  cgst, sgst, igst, round_off, grandtotal)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                "INSERT INTO performance_invoice2_header (customer_name, invoice_no, invoice_date, dc_no, dc_date, order_no, order_date, dispatch_through, discount, transport, subtotal, ordertype, cgst, sgst, igst, round_off, grandtotal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     customer_name,
                     invoice_no,
@@ -152,9 +151,7 @@ router.post("/new", async (req, res) => {
             for (const item of items) {
                 const amount = Number(item.price) * Number(item.quantity);
                 await db.promise().query(
-                    `INSERT INTO performance_invoice2_items
-                     (invoice_id, item_name, serial_no, quantity, price, uom, hsn_number, amount)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    "INSERT INTO performance_invoice2_items (invoice_id, item_name, serial_no, quantity, price, uom, hsn_number, amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         invoiceId,
                         item.item_name,
@@ -181,7 +178,7 @@ router.post("/new", async (req, res) => {
     res.status(500).json({ message: "Failed to create invoice after multiple attempts" });
 });
 
-// ── PUT update Performance Invoice 2 ─────────────────────────────────────────
+// -- PUT update Performance Invoice 2 --
 router.put("/update/:invoiceNo", async (req, res) => {
     try {
         const { invoiceNo } = req.params;
@@ -204,6 +201,7 @@ router.put("/update/:invoiceNo", async (req, res) => {
             grandtotal,
             ordertype,
             items,
+            gst_rate,
         } = req.body;
 
         if (!dispatch_through?.trim()) {
@@ -220,12 +218,7 @@ router.put("/update/:invoiceNo", async (req, res) => {
         const invoiceId = invoiceRows[0].id;
 
         await db.promise().query(
-            `UPDATE performance_invoice2_header SET
-             customer_name=?, invoice_no=?, invoice_date=?, dc_no=?, dc_date=?,
-             order_no=?, order_date=?, dispatch_through=?,
-             discount=?, transport=?, subtotal=?, ordertype=?,
-             cgst=?, sgst=?, igst=?, round_off=?, grandtotal=?
-             WHERE id=?`,
+            "UPDATE performance_invoice2_header SET customer_name=?, invoice_no=?, invoice_date=?, dc_no=?, dc_date=?, order_no=?, order_date=?, dispatch_through=?, discount=?, transport=?, subtotal=?, ordertype=?, cgst=?, sgst=?, igst=?, round_off=?, grandtotal=? WHERE id=?",
             [
                 customer_name, invoice_no, invoice_date,
                 dc_no || null, dc_date || null,
@@ -245,9 +238,7 @@ router.put("/update/:invoiceNo", async (req, res) => {
         for (const item of (items || [])) {
             const amount = Number(item.price) * Number(item.quantity);
             await db.promise().query(
-                `INSERT INTO performance_invoice2_items
-                 (invoice_id, item_name, serial_no, quantity, price, uom, hsn_number, amount)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                "INSERT INTO performance_invoice2_items (invoice_id, item_name, serial_no, quantity, price, uom, hsn_number, amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [invoiceId, item.item_name, item.serial_no || null, item.quantity, item.price,
                  item.uom || null, item.hsn_number || null, amount]
             );
@@ -260,7 +251,7 @@ router.put("/update/:invoiceNo", async (req, res) => {
     }
 });
 
-// ── DELETE Performance Invoice 2 ──────────────────────────────────────────────
+// -- DELETE Performance Invoice 2 --
 router.delete("/delete/:invoiceNo", async (req, res) => {
     try {
         const { invoiceNo } = req.params;
@@ -290,7 +281,7 @@ router.delete("/delete/:invoiceNo", async (req, res) => {
     }
 });
 
-// ── GET invoice for edit ──────────────────────────────────────────────────────
+// -- GET invoice for edit --
 router.get("/edit/:invoiceNo", async (req, res) => {
     try {
         const invoiceNo = decodeURIComponent(req.params.invoiceNo);
@@ -321,7 +312,7 @@ router.get("/edit/:invoiceNo", async (req, res) => {
     }
 });
 
-// ── GET full invoice for PDF view ─────────────────────────────────────────────
+// -- GET full invoice for PDF view --
 router.get("/full/:invoiceNo", async (req, res) => {
     try {
         const invoiceNo = decodeURIComponent(req.params.invoiceNo);
@@ -352,13 +343,13 @@ router.get("/full/:invoiceNo", async (req, res) => {
     }
 });
 
-// ── GET invoice number search ─────────────────────────────────────────────────
+// -- GET invoice number search --
 router.get("/INV/search", async (req, res) => {
     const { q } = req.query;
     try {
         const [rows] = await db.promise().query(
             "SELECT invoice_no FROM performance_invoice2_header WHERE invoice_no LIKE ? ORDER BY id DESC LIMIT 20",
-            [`%${q || ""}%`]
+            ["%" + (q || "") + "%"]
         );
         res.json(rows);
     } catch (error) {
@@ -367,15 +358,11 @@ router.get("/INV/search", async (req, res) => {
     }
 });
 
-// ── GET all Performance Invoice 2s (for report) ───────────────────────────────
+// -- GET all Performance Invoice 2s (for report) --
 router.get("/report/all", async (req, res) => {
     try {
         const [rows] = await db.promise().query(
-            `SELECT h.*, COUNT(i.id) AS item_count
-             FROM performance_invoice2_header h
-             LEFT JOIN performance_invoice2_items i ON h.id = i.invoice_id
-             GROUP BY h.id
-             ORDER BY h.id DESC`
+            "SELECT h.*, COUNT(i.id) AS item_count FROM performance_invoice2_header h LEFT JOIN performance_invoice2_items i ON h.id = i.invoice_id GROUP BY h.id ORDER BY h.id DESC"
         );
         res.json(rows);
     } catch (error) {

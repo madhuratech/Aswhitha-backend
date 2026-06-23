@@ -97,6 +97,19 @@ router.get("/search", async (req, res) => {
   }
 });
 
+// Get distinct suppliers
+router.get("/suppliers", async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT DISTINCT supplier_name FROM pcb_stock WHERE supplier_name IS NOT NULL AND supplier_name != '' ORDER BY supplier_name ASC"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching suppliers:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Inventory summary for dashboard
 router.get("/summary", async (req, res) => {
   try {
@@ -131,6 +144,25 @@ router.get("/all", async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error("Error fetching all PCB Stock:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Report endpoint with date filtering
+router.get("/report", async (req, res) => {
+  try {
+    const { fromDate, toDate } = req.query;
+    let query = "SELECT * FROM pcb_stock WHERE 1=1";
+    let values = [];
+    if (fromDate && toDate) {
+      query += " AND purchase_date BETWEEN ? AND ?";
+      values.push(fromDate, toDate);
+    }
+    query += " ORDER BY id DESC";
+    const [rows] = await db.promise().query(query, values);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching PCB stock report:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

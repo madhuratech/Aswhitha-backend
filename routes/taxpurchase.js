@@ -160,6 +160,8 @@ router.get("/items/search", async(req,res) => {
     }
 });
 
+const toDateOrNull = (val) => (val && val.trim() ? val : null);
+
 // Creat New Purchase_entry
 
 router.post("/new", async(req,res) =>{
@@ -170,7 +172,7 @@ router.post("/new", async(req,res) =>{
     }
      const [result] = await db.promise().query(
         "INSERT INTO purchase_entry (supplier_name, bill_no, bill_date, order_no, order_date, other_name, despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [supplier_name, bill_no, bill_date, order_no, order_date, other_name,  despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total]
+        [supplier_name, bill_no, toDateOrNull(bill_date), order_no, toDateOrNull(order_date), other_name,  despatch, toDateOrNull(due_date), order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total]
     );
     const purchaseId = result.insertId;
 
@@ -210,7 +212,7 @@ router.put("/update/:billNo", async(req, res) => {
         // Update the main purchase entry
         await db.promise().query(
             "UPDATE purchase_entry SET supplier_name=?, bill_no=?, bill_date=?, order_no=?, order_date=?, despatch=?, due_date=?, order_type=?, discount=?, other_charges=?, subtotal=?, cgst=?, sgst=?, igst=?, round_off=?, grand_total=? WHERE id=?",
-            [supplier_name, bill_no, bill_date, order_no, order_date, despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total, purchaseId]
+            [supplier_name, bill_no, toDateOrNull(bill_date), order_no, toDateOrNull(order_date), despatch, toDateOrNull(due_date), order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total, purchaseId]
         );
 
         // Delete existing items

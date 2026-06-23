@@ -82,6 +82,42 @@ router.get("/all", async (req, res) => {
   }
 });
 
+// Report endpoint with date and spare_name filtering
+router.get("/report", async (req, res) => {
+  try {
+    const { fromDate, toDate, spareName } = req.query;
+    let query = "SELECT * FROM spare_usage WHERE 1=1";
+    let values = [];
+    if (fromDate && toDate) {
+      query += " AND usage_date BETWEEN ? AND ?";
+      values.push(fromDate, toDate);
+    }
+    if (spareName) {
+      query += " AND spare_name = ?";
+      values.push(spareName);
+    }
+    query += " ORDER BY id DESC";
+    const [rows] = await db.promise().query(query, values);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching spare usage report:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get distinct spare names
+router.get("/spare-names", async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT MIN(id) AS id, spare_name FROM spare_usage WHERE spare_name IS NOT NULL AND spare_name != '' GROUP BY spare_name ORDER BY spare_name ASC"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching spare names:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Get single entry details
 router.get("/:usageNo", async (req, res) => {
   const { usageNo } = req.params;
