@@ -132,16 +132,22 @@ router.get("/items/type",async (req, res) => {
 
 router.post('/new',async(req,res)=>{
     try{
-        const{cn_number, client_name, cn_date , bill_number , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge, items}=req.body
+        const{cn_number, client_name, cn_date , bill_number , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, roundOff, delivery_charge, items}=req.body
         const cnNumber = await generateCNNumber();
 
-        // Convert empty strings to NULL for date fields
+        // Convert empty strings to NULL for date/string fields
         const parsedCnDate = cn_date === '' ? null : cn_date;
         const parsedBillDate = bill_date === '' ? null : bill_date;
+        const parsedBillNumber = bill_number === '' ? null : bill_number;
+
+        // Fallbacks for frontend payload key discrepancies
+        const grandTotalValue = grandTotal !== undefined ? grandTotal : req.body.grand_total;
+        const remarksValue = remarks !== undefined ? remarks : req.body.narration;
+        const roundOffValue = roundOff !== undefined ? roundOff : req.body.round_off;
 
         const[cnResult] = await db.promise().query(
-            'INSERT INTO credit_notes(cn_number, client_name, cn_date, bill_number, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [cnNumber, client_name, parsedCnDate, bill_number, parsedBillDate, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge || 0]
+            'INSERT INTO credit_notes(cn_number, client_name, cn_date, bill_number, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, roundOff, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [cnNumber, client_name, parsedCnDate, parsedBillNumber, parsedBillDate, order_type, remarksValue, subtotal, cgst, sgst, igst, grandTotalValue, roundOffValue || 0, delivery_charge || 0]
         );
         const cnID = cnResult.insertId;
 
@@ -170,9 +176,18 @@ router.post('/new',async(req,res)=>{
 router.put("/:cnNumber",async(req,res) => {
     const {cnNumber} = req.params;
     try{
-        const{client_name, order_type, cn_date, items, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge, remarks}=req.body;
-        // Convert empty string to NULL for date field
+        const{client_name, order_type, cn_date, bill_number, bill_date, items, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge, remarks}=req.body;
+        
+        // Convert empty strings to NULL for date/string fields
         const parsedCnDate = cn_date === '' ? null : cn_date;
+        const parsedBillDate = bill_date === '' ? null : bill_date;
+        const parsedBillNumber = bill_number === '' ? null : bill_number;
+
+        // Fallbacks for frontend payload key discrepancies
+        const grandTotalValue = grandTotal !== undefined ? grandTotal : req.body.grand_total;
+        const remarksValue = remarks !== undefined ? remarks : req.body.narration;
+        const roundOffValue = roundOff !== undefined ? roundOff : req.body.round_off;
+
         const[cnRows] = await db.promise().query(
             "SELECT * FROM credit_notes WHERE cn_number = ?",
             [cnNumber]
@@ -180,10 +195,10 @@ router.put("/:cnNumber",async(req,res) => {
 
         const cnID = cnRows[0].id;
         await db.promise().query(
-            `UPDATE credit_notes 
-            SET client_name=?, order_type=?, cn_date=?, subtotal=?, cgst=?, sgst=?, igst=?, roundOff=?, grandTotal=?, delivery_charge=?, remarks=? 
+            `UPDATE credit_notes
+            SET client_name=?, order_type=?, cn_date=?, bill_number=?, bill_date=?, subtotal=?, cgst=?, sgst=?, igst=?, roundOff=?, grandTotal=?, delivery_charge=?, remarks=?
             WHERE id=?`,
-            [client_name, order_type, parsedCnDate, subtotal, cgst, sgst, igst, roundOff, grandTotal, delivery_charge || 0, remarks, cnID]
+            [client_name, order_type, parsedCnDate, parsedBillNumber, parsedBillDate, subtotal, cgst, sgst, igst, roundOffValue, grandTotalValue, delivery_charge || 0, remarksValue, cnID]
         );
 
         // Delete existing items
