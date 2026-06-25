@@ -236,7 +236,8 @@ router.post("/createdc", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!s.despatch_through?.trim()) {
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
       return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 
@@ -354,7 +355,8 @@ router.put("/updatedc/:id", async (req, res) => {
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-    if (!s.despatch_through?.trim()) {
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
       return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 

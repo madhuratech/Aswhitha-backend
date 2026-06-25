@@ -66,7 +66,8 @@ router.post("/new", async (req, res) => {
     if (!s.customer_name || !s.order_no || !items.length) {
         return res.status(400).json({ message: "Customer, Client DC No and at least one item are required" });
     }
-    if (!s.despatch_through?.trim()) {
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
         return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 
@@ -129,7 +130,8 @@ router.put("/update/:dc_no", async (req, res) => {
     if (!s.customer_name || !s.dc_no || !s.payment_terms || !items.length) {
         return res.status(400).json({ message: "Customer, Admin DC No, Client DC No and at least one item are required" });
     }
-    if (!s.despatch_through?.trim()) {
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
         return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 

@@ -116,8 +116,9 @@ router.post("/createdc", async (req, res) => {
     if (!s.return_dc_no || !s.job_dc_no || !s.customer_name) {
       return res.status(400).json({ message: "Required fields missing" });
     }
-    if (!s.despatch_through?.trim()) {
-      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
+      return res.status(400).json({ message: "Invalid Despatch Through value. Must be Courier, By Hand, or Transport." });
     }
 
     // Insert Return DC Entry
@@ -197,8 +198,9 @@ router.put("/updatedc/:return_dc_no", async (req, res) => {
     if (!s.job_dc_no || !s.customer_name) {
       return res.status(400).json({ message: "Required fields missing" });
     }
-    if (!s.despatch_through?.trim()) {
-      return res.status(400).json({ message: "Despatch Through cannot be null." });
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
+      return res.status(400).json({ message: "Invalid Despatch Through value. Must be Courier, By Hand, or Transport." });
     }
 
     // 1. Get existing Return DC Entry

@@ -444,6 +444,8 @@ router.get("/ledger-customers", async (req, res) => {
          SELECT customer_name FROM service_invoices
          UNION
          SELECT customer_name FROM directinvoice
+         UNION
+         SELECT supplier_name AS customer_name FROM purchase_entry
        ) AS all_customers
        WHERE customer_name LIKE ?
        ORDER BY customer_name ASC LIMIT 200`,
@@ -511,6 +513,17 @@ router.get("/customer-ledger", async (req, res) => {
             COALESCE((SELECT SUM(ri.paid_amount) FROM receipt_items ri WHERE ri.bill_no = d.invoice_no), 0) AS receipt_paid,
             COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = d.invoice_no), 0) AS billwise_paid
           FROM directinvoice d
+
+          UNION ALL
+
+          SELECT
+            pe.bill_no,
+            pe.bill_date AS date,
+            pe.grand_total AS bill_amount,
+            pe.supplier_name AS customer_name,
+            0 AS receipt_paid,
+            COALESCE((SELECT SUM(bpi.paid_amount) FROM billwise_payment_items bpi WHERE bpi.bill_no = pe.bill_no), 0) AS billwise_paid
+          FROM purchase_entry pe
         ) AS inner_invoices
         ${whereClause}
         ORDER BY date ASC`,
@@ -558,6 +571,8 @@ router.get("/customer-ledger", async (req, res) => {
           SELECT invoice_no, invoice_date, grand_total AS grandtotal, '' AS payment_terms, customer_name FROM service_invoices
           UNION ALL
           SELECT invoice_no, invoice_date, grandtotal, payment_terms, customer_name FROM directinvoice
+          UNION ALL
+          SELECT bill_no AS invoice_no, bill_date AS invoice_date, grand_total AS grandtotal, '' AS payment_terms, supplier_name AS customer_name FROM purchase_entry
         ) inv
         ${invoiceWhere}`,
       invoiceParams

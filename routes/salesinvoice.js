@@ -259,7 +259,8 @@ router.post('/new', async (req, res) => {
     while (attempts < MAX_ATTEMPTS) {
         attempts++;
         const s = sanitizeBody(req.body);
-        if (!s.dispatch_through?.trim()) {
+        const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+        if (!s.dispatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.dispatch_through.trim())) {
             return res.status(400).json({ message: "Despatch Through cannot be null." });
         }
         const conn = await db.promise().getConnection();
@@ -355,7 +356,8 @@ router.put('/update/:invoiceNo', async (req, res) => {
     if (!s.customer_name || !s.invoice_no || !s.invoice_date || !items.length) {
         return res.status(400).json({ message: "Customer, Invoice No, Invoice Date and at least one item are required" });
     }
-    if (!s.dispatch_through?.trim()) {
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.dispatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.dispatch_through.trim())) {
         return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 
@@ -542,17 +544,61 @@ router.get('/full/:invoiceNo', async (req, res) => {
 
 // invoicenumber search
 router.get('/INV/search', async (req, res) => {
-    const { q } = req.query;
+    const { q, all } = req.query;
     const searchTerm = `%${q || ""}%`;
     try {
-        const [rows] = await db.promise().query(
-            "SELECT invoice_no FROM salesinvoice WHERE invoice_no LIKE ? ORDER BY id DESC",
-            [searchTerm]
-        );
-        res.json(rows);
+        if (all === 'true') {
+            const query = `
+                SELECT invoice_no, invoice_date, 'SalesInvoice' AS invoice_type FROM salesinvoice WHERE invoice_no LIKE ?
+                UNION
+                SELECT invoice_no, invoice_date, 'ServiceInvoice' AS invoice_type FROM service_invoices WHERE invoice_no LIKE ?
+                UNION
+                SELECT invoice_no, invoice_date, 'DirectInvoice' AS invoice_type FROM directinvoice WHERE invoice_no LIKE ?
+                ORDER BY invoice_date DESC, invoice_no DESC
+                LIMIT 50
+            `;
+            const [rows] = await db.promise().query(query, [searchTerm, searchTerm, searchTerm]);
+            res.json(rows);
+        } else {
+            const [rows] = await db.promise().query(
+                "SELECT invoice_no FROM salesinvoice WHERE invoice_no LIKE ? ORDER BY id DESC LIMIT 50",
+                [searchTerm]
+            );
+            res.json(rows);
+        }
     } catch (error) {
-        console.error("Error Searching Sales Invoice:", error);
-        res.status(500).json({ message: "Sales Invoice search failed" });
+        console.error("Error Searching Invoices:", error);
+        res.status(500).json({ message: "Invoice search failed" });
+    }
+});
+
+// Get invoice type by invoice number
+router.get('/INV/type/:invoiceNo', async (req, res) => {
+    try {
+        const invoiceNo = decodeURIComponent(req.params.invoiceNo);
+        
+        // Check salesinvoice
+        const [sales] = await db.promise().query("SELECT 1 FROM salesinvoice WHERE invoice_no = ?", [invoiceNo]);
+        if (sales.length > 0) {
+            return res.json({ invoiceNo, invoiceType: "SalesInvoice" });
+        }
+
+        // Check service_invoices
+        const [service] = await db.promise().query("SELECT 1 FROM service_invoices WHERE invoice_no = ?", [invoiceNo]);
+        if (service.length > 0) {
+            return res.json({ invoiceNo, invoiceType: "ServiceInvoice" });
+        }
+
+        // Check directinvoice
+        const [direct] = await db.promise().query("SELECT 1 FROM directinvoice WHERE invoice_no = ?", [invoiceNo]);
+        if (direct.length > 0) {
+            return res.json({ invoiceNo, invoiceType: "DirectInvoice" });
+        }
+
+        res.status(404).json({ message: "Invoice Not Found" });
+    } catch (error) {
+        console.error("Error identifying invoice type:", error);
+        res.status(500).json({ message: "Internal Server Error" });
     }
 });
 

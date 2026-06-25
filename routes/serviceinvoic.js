@@ -338,7 +338,8 @@ router.post("/create", async (req, res) => {
   while (attempts < MAX_ATTEMPTS) {
     attempts++;
     const s = sanitizeBody(req.body);
-    if (!s.dispatch_through?.trim()) {
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!s.dispatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.dispatch_through.trim())) {
       return res.status(400).json({ message: "Despatch Through cannot be null." });
     }
 
@@ -538,7 +539,8 @@ router.put("/update/:invoice_no", async (req, res) => {
         const s = sanitizeBody(req.body);
         const items = Array.isArray(req.body.items) ? req.body.items : [];
 
-        if (!s.dispatch_through?.trim()) {
+        const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+        if (!s.dispatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.dispatch_through.trim())) {
             return res.status(400).json({ message: "Despatch Through cannot be null." });
         }
 

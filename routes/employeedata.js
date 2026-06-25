@@ -220,4 +220,17 @@ router.delete("/delete/:id", async (req, res) => {
   }
 });
 
+// Get distinct department list
+router.get('/departments', async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      "SELECT DISTINCT department FROM employeedata WHERE department IS NOT NULL AND department != '' ORDER BY department ASC"
+    );
+    res.json(rows.map(r => r.department));
+  } catch (err) {
+    console.error("Error fetching departments:", err);
+    res.status(500).json({ message: "Failed to fetch departments" });
+  }
+});
+
 module.exports = router;

@@ -167,8 +167,9 @@ const toDateOrNull = (val) => (val && val.trim() ? val : null);
 router.post("/new", async(req,res) =>{
    try{
     const {supplier_name, bill_no, bill_date, order_no, order_date, other_name , despatch, due_date, order_type, discount, other_charges,subtotal, cgst, sgst, igst, round_off, grand_total, items} = req.body;
-    if (!despatch?.trim()) {
-        return res.status(400).json({ message: "Despatch Through cannot be null." });
+    const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+    if (!despatch?.trim() || !ALLOWED_DESPATCH.includes(despatch.trim())) {
+        return res.status(400).json({ message: "Invalid Despatch Through value. Must be Courier, By Hand, or Transport." });
     }
      const [result] = await db.promise().query(
         "INSERT INTO purchase_entry (supplier_name, bill_no, bill_date, order_no, order_date, other_name, despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -198,8 +199,9 @@ router.put("/update/:billNo", async(req, res) => {
         const {billNo} = req.params;
         const {supplier_name, bill_no, bill_date, order_no, order_date, despatch, due_date, order_type, discount, other_charges, subtotal, cgst, sgst, igst, round_off, grand_total, items} = req.body;
 
-        if (!despatch?.trim()) {
-            return res.status(400).json({ message: "Despatch Through cannot be null." });
+        const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+        if (!despatch?.trim() || !ALLOWED_DESPATCH.includes(despatch.trim())) {
+            return res.status(400).json({ message: "Invalid Despatch Through value. Must be Courier, By Hand, or Transport." });
         }
 
         // Get the purchase entry ID

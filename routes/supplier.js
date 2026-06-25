@@ -58,19 +58,12 @@ router.post("/create", async (req, res) => {
   const s = sanitizeBody(req.body);
   const receipt_no = await generateSupplierNumber();
 
-  // Get Po Totals
-  const [po] = await db.promise().query(
-    "SELECT grandTotal FROM purchase_orders WHERE client_name = ? ORDER BY id DESC LIMIT 1",
-    [s.supplier_name]
-  );
-
   // Calculate
-  const pototal = po.length > 0 ? po[0].grandTotal : 0;
   const paid  = toNum(s.paid_amount);
   const tds   = toNum(s.tds);
   const others = toNum(s.others);
   const net_amount     = paid - tds - others;
-  const balance_amount = pototal - paid - tds - others;
+  const balance_amount = net_amount;
 
   const [result] = await db.promise().query(
     "INSERT INTO supplier_advance (receipt_no, date, payment_mode, supplier_name, bank_name, ref_no, paid_amount, tds, others, net_amount, balance_amount, remarks, received_by, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -140,15 +133,7 @@ router.get("/report", async (req, res) => {
         sa.remarks,
         sa.received_by,
         sa.payment_status,
-        sa.payment_mode,
-
-        (
-        SELECT po.grandTotal FROM purchase_orders po
-        WHERE po.client_name = sa.supplier_name
-        ORDER BY po.id DESC LIMIT 1
-        )AS po_grand_total
-
-
+        sa.payment_mode
       FROM supplier_advance sa
       WHERE 1=1
     `;

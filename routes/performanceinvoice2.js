@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const router = express.Router();
 const db = require("../config/database");
 const { generateNextPI2InvoiceNo } = require("../helpers/pi2InvoiceNumber");
@@ -118,7 +118,8 @@ router.post("/new", async (req, res) => {
             gst_rate,
         } = req.body;
 
-        if (!dispatch_through?.trim()) {
+        const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+        if (!dispatch_through?.trim() || !ALLOWED_DESPATCH.includes(dispatch_through.trim())) {
             return res.status(400).json({ message: "Despatch Through is required." });
         }
 
@@ -204,7 +205,8 @@ router.put("/update/:invoiceNo", async (req, res) => {
             gst_rate,
         } = req.body;
 
-        if (!dispatch_through?.trim()) {
+        const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
+        if (!dispatch_through?.trim() || !ALLOWED_DESPATCH.includes(dispatch_through.trim())) {
             return res.status(400).json({ message: "Despatch Through is required." });
         }
 
