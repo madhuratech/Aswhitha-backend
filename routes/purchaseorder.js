@@ -18,14 +18,18 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
 })();
 
 
-// generate a random PO number
+// generate a PO number (AT/PO/xxxx)
 async function generatePONumber() {
   const [rows] = await db.promise().query(
-    "SELECT MAX(id) AS lastId FROM purchase_orders"
+    "SELECT po_number FROM purchase_orders"
   );
-
-  const nextId = (rows[0].lastId || 0) + 1;
-  return `PO-${String(nextId).padStart(4, "0")}`;
+  let maxNo = 0;
+  rows.forEach(({ po_number }) => {
+    const m = String(po_number).match(/^AT\/PO\/(\d+)$/);
+    if (m) { const n = parseInt(m[1], 10); if (n > maxNo) maxNo = n; }
+  });
+  const nextId = maxNo + 1;
+  return `AT/PO/${String(nextId).padStart(4, "0")}`;
 }
 
 

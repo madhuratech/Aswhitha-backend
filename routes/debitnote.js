@@ -16,14 +16,17 @@ const { computeGst } = require("../utils/gstCalc");
 })();
 
 
-// Auto Gentrate Dn Number function
-
-async function generateDNNumber() {
-  const [rows] = await db.promise().query(
-    "SELECT MAX(id) AS lastId FROM debit_notes"
-  );
-  const nextId = (rows[0].lastId || 0) + 1;
-  return `DN-${String(nextId).padStart(4, "0")}`;
+// Auto-generate Debit Note Number (plain 3-digit, starting from 008)
+async function generateDNNumber(conn) {
+  const runner = conn || db.promise();
+  const [rows] = await runner.query("SELECT dn_number FROM debit_notes");
+  let maxNo = 7;
+  rows.forEach(({ dn_number }) => {
+    const s = String(dn_number);
+    const m = s.match(/^(\d+)$/) || s.match(/^DN-?(\d+)$/i);
+    if (m) { const n = parseInt(m[1], 10); if (n > maxNo) maxNo = n; }
+  });
+  return String(maxNo + 1).padStart(3, "0");
 }
 
 // Get Debitnot number
@@ -127,50 +130,57 @@ router.get("/items/type",async (req, res) => {
     }
 })
 
-// Create new Dn order
+// Create new DN order
 
-router.post('/new',async(req,res)=>{
-    try{
-        const{dn_number, client_name, dn_date , bill_no , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge, items, gst_rate}=req.body
-        const dnNumber = await generateDNNumber();
+router.post('/new', async (req, res) => {
+  const conn = await db.promise().getConnection();
+  try {
+    await conn.beginTransaction();
 
-        // Compute GST server-side for consistency
-        const [clientRows] = await db.promise().query(
-            "SELECT state, gst_number FROM newclient WHERE customer_name = ?",
-            [client_name]
-        );
-        const client = clientRows[0] || {};
-        const computed = computeGst({
-            subtotal: subtotal || 0,
-            transport: delivery_charge || 0,
-            gstRate: gst_rate || 18,
-            gstNumber: client.gst_number,
-            state: client.state,
-        });
+    const { client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge, items, gst_rate } = req.body;
 
-        const[dnResult] = await db.promise().query(
-            'INSERT INTO debit_notes(dn_number, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [dnNumber, client_name, dn_date || null, bill_no, bill_date || null, order_type, remarks, subtotal || 0, computed.cgst, computed.sgst, computed.igst, computed.grandTotal, delivery_charge || 0]
-        );
-        const dnID = dnResult.insertId;
+    // Atomically generate DN number
+    const dnNumber = await generateDNNumber(conn);
 
-        //Insert items into debitnote_items table
+    // Compute GST server-side for consistency
+    const [clientRows] = await conn.query(
+      "SELECT state, gst_number FROM newclient WHERE customer_name = ?",
+      [client_name]
+    );
+    const client = clientRows[0] || {};
+    const computed = computeGst({
+      subtotal: subtotal || 0,
+      transport: delivery_charge || 0,
+      gstRate: gst_rate || 18,
+      gstNumber: client.gst_number,
+      state: client.state,
+    });
 
-        for(const item of items){
-            const amount = item.price * item.quantity;
-            const net = amount -(item.discount || 0);
+    const [dnResult] = await conn.query(
+      'INSERT INTO debit_notes(dn_number, client_name, dn_date, bill_no, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [dnNumber, client_name, dn_date || null, bill_no, bill_date || null, order_type, remarks, subtotal || 0, computed.cgst, computed.sgst, computed.igst, computed.grandTotal, delivery_charge || 0]
+    );
+    const dnID = dnResult.insertId;
 
-            await db.promise().query(
-             "INSERT INTO debit_note_items(dn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-             [dnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, String(item.part_no ?? ""), item.unit, net]            
-   );
-}
-         res.status(201).json({message:'Debit note created successfully', dnNumber});
-     
-    } catch(error){
-        console.log("Error Creating debitnote order", error);
-        res.status(500).json({message:"Internal server error"});
+    for (const item of items) {
+      const amount = item.price * item.quantity;
+      const net = amount - (item.discount || 0);
+
+      await conn.query(
+        "INSERT INTO debit_note_items(dn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [dnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, String(item.part_no ?? ""), item.unit, net]
+      );
     }
+
+    await conn.commit();
+    res.status(201).json({ message: 'Debit note created successfully', dnNumber });
+  } catch (error) {
+    await conn.rollback();
+    console.log("Error Creating debitnote order", error);
+    res.status(500).json({ message: "Internal server error" });
+  } finally {
+    conn.release();
+  }
 });
 
 // Update a Purchase Orfder

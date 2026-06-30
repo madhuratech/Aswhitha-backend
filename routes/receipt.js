@@ -32,18 +32,45 @@ const db = require("../config/database");
   }
 })();
 
-// Auto-generate Receipt Number
-async function generateReceiptNo() {
+// Auto-generate Receipt Number (plain, starting from 930)
+// Atomic get-and-increment via receipt_running_number counter
+async function getAndIncrementReceiptNo(conn) {
+  const runner = conn || db.promise();
+  const ownsConn = !conn;
+  try {
+    if (ownsConn) await runner.beginTransaction();
+    const [rows] = await runner.query(
+      "SELECT current_number FROM receipt_running_number WHERE id = 1 FOR UPDATE"
+    );
+    const current = rows[0].current_number;
+    await runner.query(
+      "UPDATE receipt_running_number SET current_number = current_number + 1 WHERE id = 1"
+    );
+    if (ownsConn) await runner.commit();
+    return String(current);
+  } catch (err) {
+    if (ownsConn) await runner.rollback();
+    throw err;
+  } finally {
+    if (ownsConn && runner.release) runner.release();
+  }
+}
+
+// Preview current receipt number (read-only, no increment)
+async function getCurrentReceiptNo() {
   const [rows] = await db.promise().query(
-    "SELECT MAX(id) AS lastId FROM receipts"
+    "SELECT current_number FROM receipt_running_number WHERE id = 1"
   );
-  const nextId = (rows[0].lastId || 0) + 1;
-  return `AT/REC-${nextId.toString().padStart(3, "0")}`;
+  return String(rows[0].current_number);
+}
+
+async function generateReceiptNo() {
+  return getAndIncrementReceiptNo();
 }
 
 router.get("/next-receipt-no", async (req, res) => {
   try {
-    const receipt_no = await generateReceiptNo();
+    const receipt_no = await getCurrentReceiptNo();
     res.json({ receipt_no });
   } catch (error) {
     console.error(error);
@@ -164,9 +191,15 @@ router.get("/customer-bills/:customerName", async (req, res) => {
 
 // Create Receipt
 router.post("/new", async (req, res) => {
+  const conn = await db.promise().getConnection();
   try {
+    await conn.beginTransaction();
+
+    // Atomically generate receipt number
+    const receipt_no = await getAndIncrementReceiptNo(conn);
+
     const {
-      receipt_no, receipt_date, customer_name,
+      receipt_date, customer_name,
       payment_mode, bank_name, cheque_no, cheque_date,
       total, force_amount, other_deductions, grand_total, remarks,
       items, reference_number
@@ -176,7 +209,7 @@ router.post("/new", async (req, res) => {
     const header_bank_name = bank_name || (items && items[0]?.bank_name) || "";
     const header_reference_number = reference_number || cheque_no || (items && items[0]?.reference_number) || "";
 
-    const [result] = await db.promise().query(
+    const [result] = await conn.query(
       `INSERT INTO receipts
        (receipt_no, receipt_date, customer_name, payment_mode, bank_name, cheque_no, cheque_date,
         total, force_amount, other_deductions, grand_total, remarks, reference_number)
@@ -189,7 +222,7 @@ router.post("/new", async (req, res) => {
     const receiptId = result.insertId;
 
     for (const item of items) {
-      await db.promise().query(
+      await conn.query(
         `INSERT INTO receipt_items (receipt_id, bill_no, bill_date, bill_amount, paid_amount, balance, payment_mode, bank_name, reference_number, remarks, tds_amt, advance_paid)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [receiptId, item.bill_no, item.bill_date, item.bill_amount, item.paid_amount, item.balance,
@@ -198,10 +231,14 @@ router.post("/new", async (req, res) => {
       );
     }
 
-    res.status(201).json({ message: "Receipt saved successfully" });
+    await conn.commit();
+    res.status(201).json({ message: "Receipt saved successfully", receipt_no });
   } catch (error) {
+    await conn.rollback();
     console.error(error);
     res.status(500).json({ message: "Failed to save receipt" });
+  } finally {
+    conn.release();
   }
 });
 
@@ -262,16 +299,14 @@ router.delete("/delete/:id", async (req, res) => {
   }
 });
 
-// Generate Advance Receipt Number
+// Generate Advance Receipt Number (plain, shared counter with receipts)
 async function generateAdvanceNo() {
-  const [rows] = await db.promise().query("SELECT MAX(id) AS lastId FROM receipts");
-  const nextId = (rows[0].lastId || 0) + 1;
-  return `AT/ADV-${nextId.toString().padStart(3, "0")}`;
+  return getAndIncrementReceiptNo();
 }
 
 router.get("/next-advance-no", async (req, res) => {
   try {
-    const receipt_no = await generateAdvanceNo();
+    const receipt_no = await getCurrentReceiptNo();
     res.json({ receipt_no });
   } catch (error) {
     res.status(500).json({ message: "Failed to generate advance receipt number" });
@@ -571,8 +606,6 @@ router.get("/customer-ledger", async (req, res) => {
           SELECT invoice_no, invoice_date, grand_total AS grandtotal, '' AS payment_terms, customer_name FROM service_invoices
           UNION ALL
           SELECT invoice_no, invoice_date, grandtotal, payment_terms, customer_name FROM directinvoice
-          UNION ALL
-          SELECT bill_no AS invoice_no, bill_date AS invoice_date, grand_total AS grandtotal, '' AS payment_terms, supplier_name AS customer_name FROM purchase_entry
         ) inv
         ${invoiceWhere}`,
       invoiceParams
@@ -607,6 +640,37 @@ router.get("/customer-ledger", async (req, res) => {
       receiptParams
     );
 
+    // Build tax purchase entry query (credit)
+    const tpConditions = [];
+    const tpParams = [];
+    if (customer_name) {
+      tpConditions.push("pe.supplier_name = ?");
+      tpParams.push(customer_name);
+    }
+    if (fromDate && toDate) {
+      tpConditions.push("pe.bill_date BETWEEN ? AND ?");
+      tpParams.push(fromDate, toDate);
+    }
+    const tpWhere = tpConditions.length ? "WHERE " + tpConditions.join(" AND ") : "";
+
+    const [taxPurchases] = await db.promise().query(
+      `SELECT
+         pe.bill_no          AS bill_no,
+         pe.bill_date        AS date,
+         0                   AS debit,
+         pe.grand_total      AS credit,
+         ''                  AS receipt_no,
+         pe.bill_date        AS paid_date,
+         ''                  AS payment_mode,
+         ''                  AS bank_name,
+         ''                  AS reference_number,
+         ''                  AS notes,
+         'tax_purchase_entry' AS entry_type
+       FROM purchase_entry pe
+       ${tpWhere}`,
+      tpParams
+    );
+
     // Build bill wise payments query
     const pConditions = [];
     const paymentParams = [];
@@ -625,15 +689,15 @@ router.get("/customer-ledger", async (req, res) => {
       bpi.bill_no        AS bill_no,
       bpi.bill_date      AS bill_date,
       bp.entry_date      AS date,
-      0                  AS debit,
-      bpi.paid_amount    AS credit,
+      bpi.paid_amount    AS debit,
+      0                  AS credit,
       IFNULL(bp.receipt_no, '')          AS receipt_no,
       bp.entry_date      AS paid_date,
       IFNULL(bpi.payment_mode, '')       AS payment_mode,
       IFNULL(bp.bank_name, '')           AS bank_name,
       IFNULL(bp.reference_no, '')        AS reference_number,
       nc.customer_name   AS customer_name,
-      ''                 AS notes,
+      IFNULL(bp.remarks, '')             AS notes,
       'bill_wise_payment' AS entry_type
    FROM billwise_payment_items bpi
    INNER JOIN billwise_payments bp
@@ -644,17 +708,17 @@ router.get("/customer-ledger", async (req, res) => {
       paymentParams
     );
 
-    // Sort by date ascending. If dates match, debits (invoices) appear before credits.
-    const combined = [...invoices, ...receipts, ...payments].sort((a, b) => {
+    // Sort by date ascending. If same date, sort by business flow: invoice → receipt → tax_purchase_entry → bill_wise_payment.
+    const combined = [...invoices, ...receipts, ...taxPurchases, ...payments].sort((a, b) => {
       const dateA = new Date(a.date);
       const dateB = new Date(b.date);
       if (dateA - dateB !== 0) {
         return dateA - dateB;
       }
-      const isDebitA = Number(a.debit) > 0;
-      const isDebitB = Number(b.debit) > 0;
-      if (isDebitA && !isDebitB) return -1;
-      if (!isDebitA && isDebitB) return 1;
+      const orderMap = { invoice: 1, receipt: 2, tax_purchase_entry: 3, bill_wise_payment: 4 };
+      const orderA = orderMap[a.entry_type] || 99;
+      const orderB = orderMap[b.entry_type] || 99;
+      if (orderA !== orderB) return orderA - orderB;
       return (a.bill_no || '').localeCompare(b.bill_no || '') || (a.receipt_no || '').localeCompare(b.receipt_no || '');
     });
 

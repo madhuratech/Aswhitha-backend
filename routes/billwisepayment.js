@@ -34,18 +34,44 @@ const db      = require("../config/database");
   }
 })();
 
-// Auto-generate Receipt Number
-async function generateReceiptNo() {
+// Auto-generate Bill-Wise Payment Number (plain, starting from 565)
+// Atomic get-and-increment via bwp_running_number counter
+async function getAndIncrementBwpNo(conn) {
+  const runner = conn || db.promise();
+  const ownsConn = !conn;
+  try {
+    if (ownsConn) await runner.beginTransaction();
+    const [rows] = await runner.query(
+      "SELECT current_number FROM bwp_running_number WHERE id = 1 FOR UPDATE"
+    );
+    const current = rows[0].current_number;
+    await runner.query(
+      "UPDATE bwp_running_number SET current_number = current_number + 1 WHERE id = 1"
+    );
+    if (ownsConn) await runner.commit();
+    return String(current);
+  } catch (err) {
+    if (ownsConn) await runner.rollback();
+    throw err;
+  } finally {
+    if (ownsConn && runner.release) runner.release();
+  }
+}
+
+async function getCurrentBwpNo() {
   const [rows] = await db.promise().query(
-    "SELECT MAX(id) AS lastId FROM billwise_payments"
+    "SELECT current_number FROM bwp_running_number WHERE id = 1"
   );
-  const nextId = (rows[0].lastId || 0) + 1;
-  return `BWP-${String(nextId).padStart(3, "0")}`;
+  return String(rows[0].current_number);
+}
+
+async function generateReceiptNo() {
+  return getAndIncrementBwpNo();
 }
 
 router.get("/next-receipt-no", async (req, res) => {
   try {
-    const receipt_no = await generateReceiptNo();
+    const receipt_no = await getCurrentBwpNo();
     res.json({ receipt_no });
   } catch (err) {
     res.status(500).json({ message: "Failed to generate receipt number" });
@@ -132,15 +158,19 @@ router.get("/clients/search", async (req, res) => {
 
 // ── CREATE new bill-wise payment ───────────────────────────────────────────
 router.post("/new", async (req, res) => {
+  const conn = await db.promise().getConnection();
   try {
+    await conn.beginTransaction();
+
+    // Atomically generate BWP number
+    const finalReceiptNo = await getAndIncrementBwpNo(conn);
+
     const {
       entry_date, supplier_name, bank_name, reference_no,
-      remarks, grand_total, bank_date, items, receipt_no,
+      remarks, grand_total, bank_date, items,
     } = req.body;
 
-    const finalReceiptNo = receipt_no || await generateReceiptNo();
-
-    const [result] = await db.promise().query(
+    const [result] = await conn.query(
       `INSERT INTO billwise_payments
          (entry_date, supplier_id, bank_name, reference_no, reference_number, remarks, grand_total, receipt_no)
        VALUES (?, (SELECT id FROM newclient WHERE customer_name = ? LIMIT 1), ?, ?, ?, ?, ?, ?)`,
@@ -149,7 +179,7 @@ router.post("/new", async (req, res) => {
     const paymentId = result.insertId;
 
     for (const item of items) {
-      await db.promise().query(
+      await conn.query(
         `INSERT INTO billwise_payment_items
            (payment_id, bill_no, bill_date, bill_amount, paid_amount,
             balance_amount, payment_mode, tds_amount, delivery_charge, bank_name, reference_no, reference_number)
@@ -171,6 +201,7 @@ router.post("/new", async (req, res) => {
       );
     }
 
+    await conn.commit();
     res.status(201).json({
       message:    "Bill Wise Payment Created Successfully",
       id:         paymentId,
@@ -178,8 +209,11 @@ router.post("/new", async (req, res) => {
       bill_no:    items[0]?.bill_no || "",
     });
   } catch (err) {
+    await conn.rollback();
     console.error("Error creating bill-wise payment:", err);
     res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
   }
 });
 

@@ -1,6 +1,6 @@
 const db = require("../config/database");
 
-const INVOICE_MIN = 918; // first number → AT0918
+const INVOICE_MIN = 922; // first number → AT0922
 
 // Parse an invoice_no string and return the numeric part.
 // Handles both legacy "AT/INV/034" and current "AT0918" formats.

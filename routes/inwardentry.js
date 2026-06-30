@@ -34,51 +34,36 @@ router.get("/clients/search", async (req, res) => {
    }
 });
 
-// Get All items
+// Get All items (with optional search via ?q=)
 router.get("/items/:type", async (req, res) => {
- const { type } = req.params;
- let query = "";
- if(type === "service"){
+  const { type } = req.params;
+  const { q } = req.query;
+  let query = "";
+  let params = [];
+
+  if (type === "service") {
     query = "SELECT service_name AS item_name, hsn_number FROM servicesdata";
- }
- else if(type === "spare"){
-   query = "SELECT spare_name AS item_name, hsn_number FROM sparedata";
- }
- else if(type === "purchase_item"){
+  } else if (type === "spare") {
+    query = "SELECT spare_name AS item_name, hsn_number FROM sparedata";
+  } else if (type === "purchase_item") {
     query = "SELECT item_name, hsn_number FROM purchaseitems";
- }
- try{
-    const [rows] = await db.promise().query(query);
+  }
+
+  if (q) {
+    const col = type === "service" ? "service_name" : type === "spare" ? "spare_name" : "item_name";
+    query += " WHERE " + col + " LIKE ?";
+    params.push(`%${q}%`);
+  }
+
+  query += " ORDER BY item_name ASC LIMIT 20";
+
+  try {
+    const [rows] = await db.promise().query(query, params);
     res.json(rows);
- }catch(error){
+  } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server Error" });
- }
-});
-
-// Get All items Search
-
-router.get("/items/:search", async (req, res) => {
-    const { search } = req.params;
-    const { q } = req.query;
-    const searchTerm = `%${q || ""}%`;
-    let query = "";
-    if(search === "service"){
-       query = "SELECT service_name AS item_name, hsn_number FROM servicedata WHERE service_name LIKE ?";
-    }
-    else if(search === "spares"){
-      query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ?";
-    }
-    else if(search === "purchase_item"){
-       query = "SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ?";
-    }
-    try{
-       const [rows] = await db.promise().query(query,[searchTerm]);
-       res.json(rows);
-    }catch(error){
-       console.error(error);
-       res.status(500).json({ message: "Server Error" });
-    }
+  }
 });
 
 // Create Inward Entry

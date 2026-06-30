@@ -87,12 +87,22 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
   }
 })();
 
-// Auto-generate next Job DC number
+// Auto-generate next Job DC number (J-xxx, starting from 148)
+async function generateJobDcNo(conn) {
+  const runner = conn || db.promise();
+  const [rows] = await runner.query("SELECT job_dc_no FROM job_dc_entries");
+  let maxNo = 147;
+  rows.forEach(({ job_dc_no }) => {
+    const m = String(job_dc_no).match(/^J-(\d+)$/);
+    if (m) { const n = parseInt(m[1], 10); if (n > maxNo) maxNo = n; }
+  });
+  return `J-${maxNo + 1}`;
+}
+
 router.get("/next-dc-no", async (req, res) => {
   try {
-    const [rows] = await db.promise().query("SELECT MAX(id) AS lastId FROM job_dc_entries");
-    const nextId = (rows[0].lastId || 0) + 1;
-    res.json({ dc_no: `AT/JBDC-${nextId.toString().padStart(3, "0")}` });
+    const dc_no = await generateJobDcNo();
+    res.json({ dc_no });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -115,21 +125,29 @@ router.get("/DC/search", async (req, res) => {
 
 // Create new Job DC Entry
 router.post("/createdc", async (req, res) => {
+  const conn = await db.promise().getConnection();
   try {
+    await conn.beginTransaction();
+
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
     const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
     if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
+      await conn.rollback();
+      conn.release();
       return res.status(400).json({ message: "Invalid Despatch Through value. Must be Courier, By Hand, or Transport." });
     }
 
-    const [result] = await db.promise().query(
+    // Atomically generate job DC number
+    const job_dc_no = await generateJobDcNo(conn);
+
+    const [result] = await conn.query(
       `INSERT INTO job_dc_entries
       (job_dc_no, dc_date, customer_name, is_returnable, despatch_through, order_no, order_date, purpose, order_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        s.job_dc_no,
+        job_dc_no,
         emptyToNull(s.dc_date),
         s.customer_name,
         s.is_returnable || "No",
@@ -145,7 +163,7 @@ router.post("/createdc", async (req, res) => {
 
     for (const item of items) {
       const qty = toNum(item.quantity, 1);
-      await db.promise().query(
+      await conn.query(
         `INSERT INTO job_dc_items
         (job_dc_id, item_name, quantity, uom, remarks, hsn, despatch_qty, pending_qty, order_no, order_date, serial_no)
         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
@@ -164,11 +182,14 @@ router.post("/createdc", async (req, res) => {
       );
     }
 
-    res.status(201).json({ message: "Job DC Entry created successfully", job_dc_no: s.job_dc_no });
-
+    await conn.commit();
+    res.status(201).json({ message: "Job DC Entry created successfully", job_dc_no });
   } catch (error) {
+    await conn.rollback();
     console.error("Error creating Job DC Entry:", error);
     res.status(500).json({ message: "Internal Server Error" });
+  } finally {
+    conn.release();
   }
 });
 

@@ -17,16 +17,18 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
   }
 })();
 
-// Auto Generate Quotation Number
-
+// Auto Generate Quotation Number (AT/QTN/xxxx)
 async function generateQuotationNumber () {
     const [rows] = await db.promise().query(
-        "SELECT MAX(id) AS lastId FROM quotation"
+        "SELECT quotation_no FROM quotation"
     );
-     const lastId = rows[0].lastId || 0; 
-     const nextId = lastId + 1;
-
-    return `AT/QTN-${nextId.toString().padStart(3, '0')}`;
+    let maxNo = 81;
+    rows.forEach(({ quotation_no }) => {
+        const m = String(quotation_no).match(/^AT\/QTN[\/-](\d+)$/);
+        if (m) { const n = parseInt(m[1], 10); if (n > maxNo) maxNo = n; }
+    });
+    const nextId = maxNo + 1;
+    return `AT/QTN/${nextId.toString().padStart(4, '0')}`;
 }
 
 // Get Bill No
@@ -78,13 +80,13 @@ router.get('/items/search', async(req,res) =>{
     let values = [`%${q || ""}%`];
 
     if(type === "service"){
-        query = "SELECT service_name AS item_name, hsn_number From servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? LIMIT 20 ORDER BY service_name ASC ";
+        query = "SELECT service_name AS item_name, hsn_number From servicesdata WHERE service_name LIKE ? OR hsn_number LIKE ? ORDER BY service_name ASC LIMIT 20";
     }
     else if(type === "spare"){
-        query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ? OR hsn_number LIKE ? LIMIT 20 ORDER BY spare_name ASC";
+        query = "SELECT spare_name AS item_name, hsn_number FROM sparedata WHERE spare_name LIKE ? OR hsn_number LIKE ? ORDER BY spare_name ASC LIMIT 20";
     } 
     else if(type === "purchase_item"){
-        query = "SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ? OR hsn_number LIKE ? LIMIT 20 ORDER BY item_name ASC";
+        query = "SELECT item_name, hsn_number FROM purchaseitems WHERE item_name LIKE ? OR hsn_number LIKE ? ORDER BY item_name ASC LIMIT 20";
     }
     else{
         return res.status(400).json({message: "Invalid item Type"});

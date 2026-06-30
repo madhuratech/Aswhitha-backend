@@ -60,12 +60,41 @@ const { emptyToNull, toNum, sanitizeBody } = require("../helpers/sanitize");
   }
 })();
 
-// Auto-generate next Standby DC number
+// Auto-generate next Standby DC number (plain, starting from 255)
+// Atomic get-and-increment via standby_dc_running_number counter
+async function getAndIncrementStandbyDcNo(conn) {
+  const runner = conn || db.promise();
+  const ownsConn = !conn;
+  try {
+    if (ownsConn) await runner.beginTransaction();
+    const [rows] = await runner.query(
+      "SELECT current_number FROM standby_dc_running_number WHERE id = 1 FOR UPDATE"
+    );
+    const current = rows[0].current_number;
+    await runner.query(
+      "UPDATE standby_dc_running_number SET current_number = current_number + 1 WHERE id = 1"
+    );
+    if (ownsConn) await runner.commit();
+    return String(current);
+  } catch (err) {
+    if (ownsConn) await runner.rollback();
+    throw err;
+  } finally {
+    if (ownsConn && runner.release) runner.release();
+  }
+}
+
+async function getCurrentStandbyDcNo() {
+  const [rows] = await db.promise().query(
+    "SELECT current_number FROM standby_dc_running_number WHERE id = 1"
+  );
+  return String(rows[0].current_number);
+}
+
 router.get("/next-dc-no", async (req, res) => {
   try {
-    const [rows] = await db.promise().query("SELECT MAX(id) AS lastId FROM standby_dc_entries");
-    const nextId = (rows[0].lastId || 0) + 1;
-    res.json({ dc_no: `AT/SBDC-${nextId.toString().padStart(3, "0")}` });
+    const dc_no = await getCurrentStandbyDcNo();
+    res.json({ dc_no });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -88,21 +117,29 @@ router.get("/DC/search", async (req, res) => {
 
 // Create new Standby DC Entry
 router.post("/createdc", async (req, res) => {
+  const conn = await db.promise().getConnection();
   try {
+    await conn.beginTransaction();
+
     const s = sanitizeBody(req.body);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
     const ALLOWED_DESPATCH = ["Courier", "By Hand", "Transport"];
     if (!s.despatch_through?.trim() || !ALLOWED_DESPATCH.includes(s.despatch_through.trim())) {
+      await conn.rollback();
+      conn.release();
       return res.status(400).json({ message: "Invalid Despatch Through value. Must be Courier, By Hand, or Transport." });
     }
 
-    const [result] = await db.promise().query(
+    // Atomically generate standby DC number
+    const standby_dc_no = await getAndIncrementStandbyDcNo(conn);
+
+    const [result] = await conn.query(
       `INSERT INTO standby_dc_entries
       (standby_dc_no, dc_date, customer_name, order_no, order_date, payment_terms, despatch_through, order_type, purpose)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        s.standby_dc_no,
+        standby_dc_no,
         emptyToNull(s.dc_date),
         s.customer_name,
         s.order_no,
@@ -118,7 +155,7 @@ router.post("/createdc", async (req, res) => {
 
     for (const item of items) {
       const qty = toNum(item.quantity, 1);
-      await db.promise().query(
+      await conn.query(
         `INSERT INTO standby_dc_items
         (standby_dc_id, item_name, hsn, quantity, uom, remarks, despatch_qty, pending_qty, client_dc_no, client_dc_date, serial_no)
         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
@@ -137,11 +174,14 @@ router.post("/createdc", async (req, res) => {
       );
     }
 
-    res.status(201).json({ message: "Standby DC Entry created successfully", standby_dc_no: s.standby_dc_no });
-
+    await conn.commit();
+    res.status(201).json({ message: "Standby DC Entry created successfully", standby_dc_no });
   } catch (error) {
+    await conn.rollback();
     console.error("Error creating Standby DC Entry:", error);
     res.status(500).json({ message: "Internal Server Error" });
+  } finally {
+    conn.release();
   }
 });
 

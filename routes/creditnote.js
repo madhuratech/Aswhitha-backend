@@ -14,17 +14,17 @@ const ExcelJS = require("exceljs");
 })();
 
 
-// Auto Generate CN Number function
-
-async function generateCNNumber() {
-  const [rows] = await db.promise().query(
-    "SELECT MAX(id) AS lastId FROM credit_notes"
-  );
-
-  const nextId = (rows[0].lastId || 0) + 1;
-  const year = new Date().getFullYear();
-
-  return `CN-${year}-${String(nextId).padStart(3, "0")}`;
+// Auto Generate CN Number (plain 3-digit, starting from 015)
+async function generateCNNumber(conn) {
+  const runner = conn || db.promise();
+  const [rows] = await runner.query("SELECT cn_number FROM credit_notes");
+  let maxNo = 14;
+  rows.forEach(({ cn_number }) => {
+    const s = String(cn_number);
+    const m = s.match(/^(\d+)$/) || s.match(/^CN-\d+-(\d+)$/i);
+    if (m) { const n = parseInt(m[1], 10); if (n > maxNo) maxNo = n; }
+  });
+  return String(maxNo + 1).padStart(3, "0");
 }
 
 // Get Credit Note number
@@ -130,45 +130,51 @@ router.get("/items/type",async (req, res) => {
 
 // Create new CN order
 
-router.post('/new',async(req,res)=>{
-    try{
-        const{cn_number, client_name, cn_date , bill_number , bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, roundOff, delivery_charge, items}=req.body
-        const cnNumber = await generateCNNumber();
+router.post('/new', async (req, res) => {
+  const conn = await db.promise().getConnection();
+  try {
+    await conn.beginTransaction();
 
-        // Convert empty strings to NULL for date/string fields
-        const parsedCnDate = cn_date === '' ? null : cn_date;
-        const parsedBillDate = bill_date === '' ? null : bill_date;
-        const parsedBillNumber = bill_number === '' ? null : bill_number;
+    const { client_name, cn_date, bill_number, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, roundOff, delivery_charge, items } = req.body;
 
-        // Fallbacks for frontend payload key discrepancies
-        const grandTotalValue = grandTotal !== undefined ? grandTotal : req.body.grand_total;
-        const remarksValue = remarks !== undefined ? remarks : req.body.narration;
-        const roundOffValue = roundOff !== undefined ? roundOff : req.body.round_off;
+    // Atomically generate CN number
+    const cnNumber = await generateCNNumber(conn);
 
-        const[cnResult] = await db.promise().query(
-            'INSERT INTO credit_notes(cn_number, client_name, cn_date, bill_number, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, roundOff, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [cnNumber, client_name, parsedCnDate, parsedBillNumber, parsedBillDate, order_type, remarksValue, subtotal, cgst, sgst, igst, grandTotalValue, roundOffValue || 0, delivery_charge || 0]
-        );
-        const cnID = cnResult.insertId;
+    // Convert empty strings to NULL for date/string fields
+    const parsedCnDate = cn_date === '' ? null : cn_date;
+    const parsedBillDate = bill_date === '' ? null : bill_date;
+    const parsedBillNumber = bill_number === '' ? null : bill_number;
 
-        //Insert items into credit_note_items table
+    const grandTotalValue = grandTotal !== undefined ? grandTotal : req.body.grand_total;
+    const remarksValue = remarks !== undefined ? remarks : req.body.narration;
+    const roundOffValue = roundOff !== undefined ? roundOff : req.body.round_off;
 
-        for(const item of items){
-            const amount = item.price * item.quantity;
-            const net = amount -(item.discount || 0);
+    const [cnResult] = await conn.query(
+      'INSERT INTO credit_notes(cn_number, client_name, cn_date, bill_number, bill_date, order_type, remarks, subtotal, cgst, sgst, igst, grandTotal, roundOff, delivery_charge) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [cnNumber, client_name, parsedCnDate, parsedBillNumber, parsedBillDate, order_type, remarksValue, subtotal, cgst, sgst, igst, grandTotalValue, roundOffValue || 0, delivery_charge || 0]
+    );
+    const cnID = cnResult.insertId;
 
-            await db.promise().query(
-                `INSERT INTO credit_note_items(cn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount) 
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [cnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, item.part_no, item.unit, net]            
-            );
-        }
-        res.status(201).json({message:'Credit note created successfully', cnNumber});
-       
-    } catch(error){
-        console.log("Error Creating creditnote order", error);
-        res.status(500).json({message:"Internal server error"});
+    for (const item of items) {
+      const amount = item.price * item.quantity;
+      const net = amount - (item.discount || 0);
+
+      await conn.query(
+        `INSERT INTO credit_note_items(cn_id, item_name, hsn_code, quantity, price, amount, discount, part_no, unit, net_amount) 
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [cnID, item.item_name, item.hsn_code, item.quantity, item.price, amount, item.discount || 0, item.part_no, item.unit, net]
+      );
     }
+
+    await conn.commit();
+    res.status(201).json({ message: 'Credit note created successfully', cnNumber });
+  } catch (error) {
+    await conn.rollback();
+    console.log("Error Creating creditnote order", error);
+    res.status(500).json({ message: "Internal server error" });
+  } finally {
+    conn.release();
+  }
 });
 
 // Update a Credit Note

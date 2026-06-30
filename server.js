@@ -361,7 +361,7 @@ db.promise().query(
         const m = String(str).match(/(\d+)\s*$/);
         return m ? parseInt(m[1], 10) : 0;
       };
-      let maxNo = 1190;
+      let maxNo = 1195;
       [...salesRows, ...serviceRows].forEach(r => { maxNo = Math.max(maxNo, extractNum(r.dc_no)); });
       await db.promise().query(
         "INSERT INTO dc_running_number (id, current_number) VALUES (1, ?)",
@@ -374,6 +374,121 @@ db.promise().query(
   }
 })();
 
+// -- Enforce minimum DC number: 1196 -------------------------------------------
+(async () => {
+  try {
+    const [counterRow] = await db.promise().query("SELECT current_number FROM dc_running_number WHERE id = 1");
+    if (counterRow.length && counterRow[0].current_number < 1196) {
+      await db.promise().query("UPDATE dc_running_number SET current_number = 1196 WHERE id = 1 AND current_number < 1196");
+      console.log("dc_running_number updated to minimum 1196");
+    }
+  } catch (e) {
+    console.error("dc_running_number min enforcement error:", e.message);
+  }
+})();
+
+// -- Receipt / Advance Running Number Counter -----------------------------------
+(async () => {
+  try {
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS receipt_running_number (
+        id INT PRIMARY KEY DEFAULT 1,
+        current_number INT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )`
+    );
+    const [rows] = await db.promise().query("SELECT COUNT(*) AS cnt FROM receipt_running_number");
+    if (rows[0].cnt === 0) {
+      const [receiptRows] = await db.promise().query("SELECT receipt_no FROM receipts");
+      const extractNum = (str) => {
+        if (!str) return 0;
+        const m1 = String(str).match(/^(\d+)$/);
+        if (m1) return parseInt(m1[1], 10);
+        const m2 = String(str).match(/^AT\/(?:REC|ADV)-(\d+)$/i);
+        return m2 ? parseInt(m2[1], 10) : 0;
+      };
+      let maxNo = 929;
+      receiptRows.forEach(r => { maxNo = Math.max(maxNo, extractNum(r.receipt_no)); });
+      const seed = Math.max(maxNo + 1, 930);
+      await db.promise().query(
+        "INSERT INTO receipt_running_number (id, current_number) VALUES (1, ?)",
+        [seed]
+      );
+      console.log(`receipt_running_number seeded with current_number = ${seed}`);
+    }
+  } catch (e) {
+    console.error("receipt_running_number migration error:", e.message);
+  }
+})();
+
+// -- Bill-Wise Payment Running Number Counter -----------------------------------
+(async () => {
+  try {
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS bwp_running_number (
+        id INT PRIMARY KEY DEFAULT 1,
+        current_number INT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )`
+    );
+    const [rows] = await db.promise().query("SELECT COUNT(*) AS cnt FROM bwp_running_number");
+    if (rows[0].cnt === 0) {
+      const [bwpRows] = await db.promise().query("SELECT receipt_no FROM billwise_payments");
+      const extractNum = (str) => {
+        if (!str) return 0;
+        const m1 = String(str).match(/^(\d+)$/);
+        if (m1) return parseInt(m1[1], 10);
+        const m2 = String(str).match(/^BWP-(\d+)$/i);
+        return m2 ? parseInt(m2[1], 10) : 0;
+      };
+      let maxNo = 564;
+      bwpRows.forEach(r => { maxNo = Math.max(maxNo, extractNum(r.receipt_no)); });
+      const seed = Math.max(maxNo + 1, 565);
+      await db.promise().query(
+        "INSERT INTO bwp_running_number (id, current_number) VALUES (1, ?)",
+        [seed]
+      );
+      console.log(`bwp_running_number seeded with current_number = ${seed}`);
+    }
+  } catch (e) {
+    console.error("bwp_running_number migration error:", e.message);
+  }
+})();
+
+// -- Standby DC Running Number Counter ------------------------------------------
+(async () => {
+  try {
+    await db.promise().query(
+      `CREATE TABLE IF NOT EXISTS standby_dc_running_number (
+        id INT PRIMARY KEY DEFAULT 1,
+        current_number INT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )`
+    );
+    const [rows] = await db.promise().query("SELECT COUNT(*) AS cnt FROM standby_dc_running_number");
+    if (rows[0].cnt === 0) {
+      const [sRows] = await db.promise().query("SELECT standby_dc_no FROM standby_dc_entries");
+      const extractNum = (str) => {
+        if (!str) return 0;
+        const m1 = String(str).match(/^(\d+)$/);
+        if (m1) return parseInt(m1[1], 10);
+        const m2 = String(str).match(/^AT\/SBDC-(\d+)$/i);
+        return m2 ? parseInt(m2[1], 10) : 0;
+      };
+      let maxNo = 254;
+      sRows.forEach(r => { maxNo = Math.max(maxNo, extractNum(r.standby_dc_no)); });
+      const seed = Math.max(maxNo + 1, 255);
+      await db.promise().query(
+        "INSERT INTO standby_dc_running_number (id, current_number) VALUES (1, ?)",
+        [seed]
+      );
+      console.log(`standby_dc_running_number seeded with current_number = ${seed}`);
+    }
+  } catch (e) {
+    console.error("standby_dc_running_number migration error:", e.message);
+  }
+})();
+
 const app = express();
 
 app.use(cors());
@@ -382,36 +497,46 @@ app.use(express.json({limit: "200mb"}));
 
 app.use(express.urlencoded({extended: true, limit: "200mb"}));
 
-app.use("/api/customers", require("./routes/ClientRoutes"));
-app.use("/api/employees", require("./routes/employeedata"));
-app.use("/api/Sparemodels", require("./routes/sparemodel"));
-app.use("/api/Services", require("./routes/services"));
-app.use("/api/expenses", require("./routes/expensedata"));
-app.use("/api/purchaseitems", require("./routes/purchase"));
-app.use("/api/purchaseorders", require("./routes/purchaseorder"));
-app.use("/api/debitnotes", require("./routes/debitnote"));
-app.use("/api/suppliers", require("./routes/supplier"));
-app.use("/api/taxpurchases", require("./routes/taxpurchase"));
-app.use("/api/billpayment", require("./routes/billwisepayment"));
-app.use("/api/quotations", require("./routes/quotation"));
-app.use("/api/directinvoices", require("./routes/directinvoice"));
-app.use("/api/performanceinvoices2", require("./routes/performanceinvoice2"));
-app.use("/api/salesinvoices", require("./routes/salesinvoice"));
-app.use("/api/salesdc", require("./routes/salesdc"));
-app.use("/api/Inwardentries", require("./routes/inwardentry"));
-app.use("/api/servicedcentry", require("./routes/dcEntry"));
-app.use("/api/serviceinvoice", require("./routes/serviceinvoic"));
-app.use("/api/receipts", require("./routes/receipt"));
-app.use("/api/pendings", require("./routes/pending"));
-app.use("/api/creditnotes", require("./routes/creditnote"));
-app.use("/api/pcb-stock", require("./routes/pcbstock"));
-app.use("/api/standby-pcb", require("./routes/standbypcb"));
-app.use("/api/scrappcb", require("./routes/scrappcb"));
-app.use("/api/spareusage", require("./routes/spareusage"));
-app.use("/api/jobdcentry", require("./routes/jobDcEntry"));
-app.use("/api/jobreturndc", require("./routes/jobReturnDc"));
-app.use("/api/standbydcentry", require("./routes/standbyDcEntry"));
-app.use("/api/standbyreturndc", require("./routes/standbyReturnDc"));
+// ── Public auth routes (no JWT required) ─────────────────────────────────────
+app.use("/api/auth", require("./routes/auth"));
+
+// ── Protected API routes (JWT required) ──────────────────────────────────────
+const authMiddleware = require("./middleware/auth");
+const protectedRouter = express.Router();
+protectedRouter.use(authMiddleware);
+
+protectedRouter.use("/customers", require("./routes/ClientRoutes"));
+protectedRouter.use("/employees", require("./routes/employeedata"));
+protectedRouter.use("/Sparemodels", require("./routes/sparemodel"));
+protectedRouter.use("/Services", require("./routes/services"));
+protectedRouter.use("/expenses", require("./routes/expensedata"));
+protectedRouter.use("/purchaseitems", require("./routes/purchase"));
+protectedRouter.use("/purchaseorders", require("./routes/purchaseorder"));
+protectedRouter.use("/debitnotes", require("./routes/debitnote"));
+protectedRouter.use("/suppliers", require("./routes/supplier"));
+protectedRouter.use("/taxpurchases", require("./routes/taxpurchase"));
+protectedRouter.use("/billpayment", require("./routes/billwisepayment"));
+protectedRouter.use("/quotations", require("./routes/quotation"));
+protectedRouter.use("/directinvoices", require("./routes/directinvoice"));
+protectedRouter.use("/performanceinvoices2", require("./routes/performanceinvoice2"));
+protectedRouter.use("/salesinvoices", require("./routes/salesinvoice"));
+protectedRouter.use("/salesdc", require("./routes/salesdc"));
+protectedRouter.use("/Inwardentries", require("./routes/inwardentry"));
+protectedRouter.use("/servicedcentry", require("./routes/dcEntry"));
+protectedRouter.use("/serviceinvoice", require("./routes/serviceinvoic"));
+protectedRouter.use("/receipts", require("./routes/receipt"));
+protectedRouter.use("/pendings", require("./routes/pending"));
+protectedRouter.use("/creditnotes", require("./routes/creditnote"));
+protectedRouter.use("/pcb-stock", require("./routes/pcbstock"));
+protectedRouter.use("/standby-pcb", require("./routes/standbypcb"));
+protectedRouter.use("/scrappcb", require("./routes/scrappcb"));
+protectedRouter.use("/spareusage", require("./routes/spareusage"));
+protectedRouter.use("/jobdcentry", require("./routes/jobDcEntry"));
+protectedRouter.use("/jobreturndc", require("./routes/jobReturnDc"));
+protectedRouter.use("/standbydcentry", require("./routes/standbyDcEntry"));
+protectedRouter.use("/standbyreturndc", require("./routes/standbyReturnDc"));
+
+app.use("/api", protectedRouter);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
